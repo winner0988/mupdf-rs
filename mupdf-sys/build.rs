@@ -206,6 +206,31 @@ fn patch_mupdf_sources(build_dir: &Path) -> Result<()> {
         }
     }
 
+    // OpenJPEG 2.5.3 and 2.5.4, and the copy of it that MuPDF 1.27.2 bundles, write
+    // `tp_index[current_tpsno]` in `opj_j2k_read_sod` without checking the index: a codestream
+    // with a TLM marker, `TNsot == 0` and more tile-parts than the TLM lists makes it write past
+    // the end of a heap block. Fixed upstream in uclouvain/openjpeg 91d08b11 (not in a release
+    // yet) and in ArtifexSoftware/thirdparty-openjpeg 328a8da, which MuPDF 1.28.0 and later use.
+    // This is that change, word for word. A build that can apply neither it nor find it already
+    // applied fails: silently building without the check is worse than not building.
+    let path = build_dir.join("thirdparty/openjpeg/src/lib/openjp2/j2k.c");
+    let mut source =
+        fs::read_to_string(&path).map_err(|e| format!("Unable to read {}: {e}", path.display()))?;
+    source = source.replace("\r\n", "\n");
+
+    let old = "        l_cstr_index->tile_index[p_j2k->m_current_tile_number].tp_index[l_current_tile_part].end_header\n            =\n                l_current_pos;\n        l_cstr_index->tile_index[p_j2k->m_current_tile_number].tp_index[l_current_tile_part].end_pos\n            =\n                l_current_pos + p_j2k->m_specific_param.m_decoder.m_sot_length + 2;\n";
+    let new = "        if (l_cstr_index->tile_index[p_j2k->m_current_tile_number].tp_index &&\n                l_current_tile_part <\n                l_cstr_index->tile_index[p_j2k->m_current_tile_number].nb_tps) {\n            l_cstr_index->tile_index[p_j2k->m_current_tile_number].tp_index[l_current_tile_part].end_header\n                = l_current_pos;\n            l_cstr_index->tile_index[p_j2k->m_current_tile_number].tp_index[l_current_tile_part].end_pos\n                = l_current_pos + p_j2k->m_specific_param.m_decoder.m_sot_length + 2;\n        }\n";
+    if !source.contains(new) {
+        if !source.contains(old) {
+            Err(format!(
+                "Unable to patch opj_j2k_read_sod in {}: neither the unchecked write nor the fix was found",
+                path.display()
+            ))?;
+        }
+        source = source.replacen(old, new, 1);
+        fs::write(&path, source).map_err(|e| format!("Unable to write {}: {e}", path.display()))?;
+    }
+
     Ok(())
 }
 
