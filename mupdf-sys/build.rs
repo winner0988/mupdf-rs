@@ -255,6 +255,208 @@ fn patch_mupdf_sources(build_dir: &Path) -> Result<()> {
         fs::write(&path, source).map_err(|e| format!("Unable to write {}: {e}", path.display()))?;
     }
 
+    // Tesseract 5.5.0 lacks bounds checking on count and length fields read
+    // from traineddata files before allocating or indexing arrays, as well as
+    // LSTM gate matrix and recoder sanity checks. Fixed upstream in
+    // tesseract-ocr/tesseract:
+    // - 82727cc11c34eaf1249af002d69f6bbae70993b9
+    // - 55287a94b8044c05ce3fd10f5aca6ebbd238e518
+    // - b494ac18925f9d9aff9ef5815475de9943ab19bf
+    // - c94a5532ee04db5a4919542832fd94caee5ea58f
+    // These are those changes, word for word. A build that can apply neither
+    // them nor find them already applied fails: silently building without the
+    // checks is worse than not building.
+    let tesseract_patches: &[(&str, &str, &str)] = &[
+        (
+            "thirdparty/tesseract/src/ccstruct/fontinfo.cpp",
+            "  if (!f->DeSerialize(&size)) {\n    return false;\n  }\n  char *font_name = new char[size + 1];\n  fi->name = font_name;\n  if (!f->DeSerialize(font_name, size)) {",
+            "  if (!f->DeSerialize(&size)) {\n    return false;\n  }\n  // Reject unreasonably large font names to prevent overflow in size + 1.\n  if (size > 100000) {\n    return false;\n  }\n  char *font_name = new char[size + 1];\n  fi->name = font_name;\n  if (!f->DeSerialize(font_name, size)) {",
+        ),
+        (
+            "thirdparty/tesseract/src/ccstruct/fontinfo.cpp",
+            "}\n\nbool read_spacing_info(TFile *f, FontInfo *fi) {\n  int32_t vec_size, kern_size;\n  if (!f->DeSerialize(&vec_size)) {\n    return false;\n  }\n  ASSERT_HOST(vec_size >= 0);\n  if (vec_size == 0) {\n    return true;\n  }\n  fi->init_spacing(vec_size);\n  for (int i = 0; i < vec_size; ++i) {\n    auto *fs = new FontSpacingInfo();\n    if (!f->DeSerialize(&fs->x_gap_before) || !f->DeSerialize(&fs->x_gap_after) ||\n        !f->DeSerialize(&kern_size)) {",
+            "}\n\nbool read_spacing_info(TFile *f, FontInfo *fi) {\n  uint32_t vec_size;\n  int32_t kern_size;\n  if (!f->DeSerialize(&vec_size)) {\n    return false;\n  }\n  if (vec_size == 0) {\n    return true;\n  }\n  fi->init_spacing(vec_size);\n  for (uint32_t i = 0; i < vec_size; ++i) {\n    auto *fs = new FontSpacingInfo();\n    if (!f->DeSerialize(&fs->x_gap_before) || !f->DeSerialize(&fs->x_gap_after) ||\n        !f->DeSerialize(&kern_size)) {",
+        ),
+        (
+            "thirdparty/tesseract/src/ccstruct/fontinfo.h",
+            "  bool DeSerialize(TFile *fp);\n\n  // Reserves unicharset_size spots in spacing_vec.\n  void init_spacing(int unicharset_size) {\n    spacing_vec = new std::vector<FontSpacingInfo *>(unicharset_size);\n  }\n  // Adds the given pointer to FontSpacingInfo to spacing_vec member",
+            "  bool DeSerialize(TFile *fp);\n\n  // Reserves unicharset_size spots in spacing_vec.\n  void init_spacing(uint32_t unicharset_size) {\n    spacing_vec = new std::vector<FontSpacingInfo *>(unicharset_size);\n  }\n  // Adds the given pointer to FontSpacingInfo to spacing_vec member",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/bitvector.cpp",
+            "  if (swap) {\n    ReverseN(&new_bit_size, sizeof(new_bit_size));\n  }\n  Alloc(new_bit_size);\n  int wordlen = WordLength();\n  if (!tesseract::DeSerialize(fp, &array_[0], wordlen)) {",
+            "  if (swap) {\n    ReverseN(&new_bit_size, sizeof(new_bit_size));\n  }\n  // Reject unreasonably large bit vectors.\n  if (new_bit_size > 500000000) {\n    return false;\n  }\n  Alloc(new_bit_size);\n  int wordlen = WordLength();\n  if (!tesseract::DeSerialize(fp, &array_[0], wordlen)) {",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/serialis.cpp",
+            "  if (!DeSerialize(&len)) {\n    return false;\n  }\n  return Skip(len * size);\n}\n\nbool TFile::DeSerialize(std::string &data) {\n  uint32_t size;\n  if (!DeSerialize(&size)) {\n    return false;\n  } else if (size > 0) {\n    // TODO: optimize.\n    data.resize(size);",
+            "  if (!DeSerialize(&len)) {\n    return false;\n  }\n  // Check for overflow: len * size must not overflow size_t.\n  if (size != 0 && len > SIZE_MAX / size) {\n    return false;\n  }\n  return Skip(len * size);\n}\n\nbool TFile::DeSerialize(std::string &data) {\n  uint32_t size;\n  if (!DeSerialize(&size)) {\n    return false;\n  } else if (size > 50000000) {\n    // Arbitrarily limit the size to protect against bad data.\n    return false;\n  } else if (size > 0) {\n    // TODO: optimize.\n    data.resize(size);",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/serialis.cpp",
+            "  uint32_t size;\n  if (!DeSerialize(&size)) {\n    return false;\n  } else if (size > 0) {\n    // TODO: optimize.\n    data.resize(size);",
+            "  uint32_t size;\n  if (!DeSerialize(&size)) {\n    return false;\n  } else if (size > 50000000) {\n    // Arbitrarily limit the size to protect against bad data.\n    return false;\n  } else if (size > 0) {\n    // TODO: optimize.\n    data.resize(size);",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/tessdatamanager.cpp",
+            "  }\n  for (unsigned i = 0; i < num_entries && i < TESSDATA_NUM_ENTRIES; ++i) {\n    if (offset_table[i] >= 0) {\n      int64_t entry_size = size - offset_table[i];\n      unsigned j = i + 1;\n      while (j < num_entries && offset_table[j] == -1) {\n        ++j;\n      }\n      if (j < num_entries) {\n        entry_size = offset_table[j] - offset_table[i];\n      }\n      entries_[i].resize(entry_size);\n      if (!fp.DeSerialize(&entries_[i][0], entry_size)) {\n        return false;",
+            "  }\n  for (unsigned i = 0; i < num_entries && i < TESSDATA_NUM_ENTRIES; ++i) {\n    if (offset_table[i] >= 0) {\n      if (offset_table[i] > size) {\n        return false;\n      }\n      int64_t entry_size = size - offset_table[i];\n      unsigned j = i + 1;\n      while (j < num_entries && offset_table[j] == -1) {\n        ++j;\n      }\n      if (j < num_entries) {\n        if (offset_table[j] < 0 || offset_table[j] > size) {\n          return false;\n        }\n        entry_size = offset_table[j] - offset_table[i];\n      }\n      if (entry_size < 0) {\n        return false;\n      }\n      entries_[i].resize(entry_size);\n      if (!fp.DeSerialize(&entries_[i][0], entry_size)) {\n        return false;",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/unicharcompress.h",
+            "    length_ = length;\n  }\n  // Sets the code value at the given index in the code.\n  void Set(int index, int value) {\n    code_[index] = value;\n    if (length_ <= index) {\n      length_ = index + 1;",
+            "    length_ = length;\n  }\n  // Sets the code value at the given index in the code.\n  void Set(uint32_t index, int value) {\n    code_[index] = value;\n    if (length_ <= index) {\n      length_ = index + 1;",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/unicharcompress.h",
+            "    return length_ == 0;\n  }\n  // Accessors\n  int length() const {\n    return length_;\n  }\n  int operator()(int index) const {",
+            "    return length_ == 0;\n  }\n  // Accessors\n  uint32_t length() const {\n    return length_;\n  }\n  int operator()(int index) const {",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/unicharcompress.h",
+            "  }\n  // Reads from the given file. Returns false in case of error.\n  bool DeSerialize(TFile *fp) {\n    return fp->DeSerialize(&self_normalized_) && fp->DeSerialize(&length_) &&\n           fp->DeSerialize(&code_[0], length_);\n  }\n  bool operator==(const RecodedCharID &other) const {\n    if (length_ != other.length_) {\n      return false;\n    }\n    for (int i = 0; i < length_; ++i) {\n      if (code_[i] != other.code_[i]) {\n        return false;\n      }",
+            "  }\n  // Reads from the given file. Returns false in case of error.\n  bool DeSerialize(TFile *fp) {\n    if (!fp->DeSerialize(&self_normalized_) || !fp->DeSerialize(&length_)) {\n      return false;\n    }\n    if (length_ > kMaxCodeLen) {\n      return false;\n    }\n    return fp->DeSerialize(&code_[0], length_);\n  }\n  bool operator==(const RecodedCharID &other) const {\n    if (length_ != other.length_) {\n      return false;\n    }\n    for (uint32_t i = 0; i < length_; ++i) {\n      if (code_[i] != other.code_[i]) {\n        return false;\n      }",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/unicharcompress.h",
+            "  struct RecodedCharIDHash {\n    uint64_t operator()(const RecodedCharID &code) const {\n      uint64_t result = 0;\n      for (int i = 0; i < code.length_; ++i) {\n        result ^= static_cast<uint64_t>(code(i)) << (7 * i);\n      }\n      return result;",
+            "  struct RecodedCharIDHash {\n    uint64_t operator()(const RecodedCharID &code) const {\n      uint64_t result = 0;\n      for (uint32_t i = 0; i < code.length_; ++i) {\n        result ^= static_cast<uint64_t>(code(i)) << (7 * i);\n      }\n      return result;",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/unicharcompress.h",
+            "  // that map to the same code. Has boolean value, but int8_t for serialization.\n  int8_t self_normalized_;\n  // The number of elements in use in code_;\n  int32_t length_;\n  // The re-encoded form of the unichar-id to which this RecodedCharID relates.\n  int32_t code_[kMaxCodeLen];\n};",
+            "  // that map to the same code. Has boolean value, but int8_t for serialization.\n  int8_t self_normalized_;\n  // The number of elements in use in code_;\n  uint32_t length_;\n  // The re-encoded form of the unichar-id to which this RecodedCharID relates.\n  int32_t code_[kMaxCodeLen];\n};",
+        ),
+        (
+            "thirdparty/tesseract/src/dict/dawg.cpp",
+            "            (!word_end || end_of_word_from_edge_rec(edges_[edge]))) {\n          return (edge);\n        }\n      } while (!last_edge(edge++));\n    }\n  }\n  return (NO_EDGE); // not found",
+            "            (!word_end || end_of_word_from_edge_rec(edges_[edge]))) {\n          return (edge);\n        }\n        if (last_edge(edge)) {\n          break;\n        }\n        ++edge;\n      } while (edge < num_edges_);\n    }\n  }\n  return (NO_EDGE); // not found",
+        ),
+        (
+            "thirdparty/tesseract/src/dict/dawg.cpp",
+            "  if (forward_edge(edge)) {\n    do {\n      num++;\n    } while (!last_edge(edge++));\n  }\n\n  return (num);",
+            "  if (forward_edge(edge)) {\n    do {\n      num++;\n      if (last_edge(edge)) {\n        break;\n      }\n      ++edge;\n    } while (edge < num_edges_);\n  }\n\n  return (num);",
+        ),
+        (
+            "thirdparty/tesseract/src/dict/dawg.cpp",
+            "      if (edge - node > max_num_edges) {\n        return;\n      }\n    } while (!last_edge(edge++));\n\n    if (edge < num_edges_ && edge_occupied(edge) && backward_edge(edge)) {\n      do {",
+            "      if (edge - node > max_num_edges) {\n        return;\n      }\n      if (last_edge(edge)) {\n        break;\n      }\n      ++edge;\n    } while (edge < num_edges_);\n\n    if (edge < num_edges_ && edge_occupied(edge) && backward_edge(edge)) {\n      do {",
+        ),
+        (
+            "thirdparty/tesseract/src/dict/dawg.cpp",
+            "        if (edge - node > MAX_NODE_EDGES_DISPLAY) {\n          return;\n        }\n      } while (!last_edge(edge++));\n    }\n  } else {\n    tprintf(REFFORMAT \" : no edges in this node\\n\", node);",
+            "        if (edge - node > MAX_NODE_EDGES_DISPLAY) {\n          return;\n        }\n        if (last_edge(edge)) {\n          break;\n        }\n        ++edge;\n      } while (edge < num_edges_);\n    }\n  } else {\n    tprintf(REFFORMAT \" : no edges in this node\\n\", node);",
+        ),
+        (
+            "thirdparty/tesseract/src/dict/dawg.cpp",
+            "    return false;\n  }\n\n  int32_t unicharset_size;\n  if (!file->DeSerialize(&unicharset_size)) {\n    return false;\n  }\n  if (!file->DeSerialize(&num_edges_)) {\n    return false;\n  }\n  ASSERT_HOST(num_edges_ > 0); // DAWG should not be empty\n  Dawg::init(unicharset_size);\n\n  edges_ = new EDGE_RECORD[num_edges_];\n  if (!file->DeSerialize(&edges_[0], num_edges_)) {\n    return false;\n  }\n  if (debug_level_ > 2) {\n    tprintf(\"type: %d lang: %s perm: %d unicharset_size: %d num_edges: %d\\n\",\n            type_, lang_.c_str(), perm_, unicharset_size_, num_edges_);\n    for (EDGE_REF edge = 0; edge < num_edges_; ++edge) {\n      print_edge(edge);",
+            "    return false;\n  }\n\n  uint32_t unicharset_size;\n  if (!file->DeSerialize(&unicharset_size)) {\n    return false;\n  }\n  if (!file->DeSerialize(&num_edges_)) {\n    return false;\n  }\n  if (num_edges_ == 0) {\n    tprintf(\"Empty dawg: num_edges is 0\\n\");\n    return false;\n  }\n  Dawg::init(unicharset_size);\n\n  edges_ = new EDGE_RECORD[num_edges_];\n  if (!file->DeSerialize(&edges_[0], num_edges_)) {\n    return false;\n  }\n  if (debug_level_ > 2) {\n    tprintf(\"type: %d lang: %s perm: %d unicharset_size: %d num_edges: %\" PRIu32 \"\\n\",\n            type_, lang_.c_str(), perm_, unicharset_size_, num_edges_);\n    for (EDGE_REF edge = 0; edge < num_edges_; ++edge) {\n      print_edge(edge);",
+        ),
+        (
+            "thirdparty/tesseract/src/dict/dawg.cpp",
+            "        break;\n      }\n      if (backward_edge(edge)) {\n        while (!last_edge(edge++)) {\n          ;\n        }\n      }\n      edge--;",
+            "        break;\n      }\n      if (backward_edge(edge)) {\n        while (edge < num_edges_ && !last_edge(edge)) {\n          ++edge;\n        }\n        if (edge < num_edges_) {\n          ++edge; // Skip past the last backward edge.\n        }\n      }\n      edge--;",
+        ),
+        (
+            "thirdparty/tesseract/src/dict/dawg.h",
+            "    ASSERT_HOST(read_squished_dawg(&file));\n    num_forward_edges_in_node0 = num_forward_edges(0);\n  }\n  SquishedDawg(EDGE_ARRAY edges, int num_edges, DawgType type,\n               const std::string &lang, PermuterType perm, int unicharset_size,\n               int debug_level)\n      : Dawg(type, lang, perm, debug_level),",
+            "    ASSERT_HOST(read_squished_dawg(&file));\n    num_forward_edges_in_node0 = num_forward_edges(0);\n  }\n  SquishedDawg(EDGE_ARRAY edges, uint32_t num_edges, DawgType type,\n               const std::string &lang, PermuterType perm, int unicharset_size,\n               int debug_level)\n      : Dawg(type, lang, perm, debug_level),",
+        ),
+        (
+            "thirdparty/tesseract/src/dict/dawg.h",
+            "    return true;\n  }\n\n  int NumEdges() {\n    return num_edges_;\n  }\n",
+            "    return true;\n  }\n\n  uint32_t NumEdges() const {\n    return num_edges_;\n  }\n",
+        ),
+        (
+            "thirdparty/tesseract/src/dict/dawg.h",
+            "      if (!word_end || end_of_word_from_edge_rec(edges_[edge])) {\n        vec->push_back(NodeChild(unichar_id_from_edge_rec(edges_[edge]), edge));\n      }\n    } while (!last_edge(edge++));\n  }\n\n  /// Returns the next node visited by following the edge",
+            "      if (!word_end || end_of_word_from_edge_rec(edges_[edge])) {\n        vec->push_back(NodeChild(unichar_id_from_edge_rec(edges_[edge]), edge));\n      }\n      if (last_edge(edge)) {\n        break;\n      }\n      ++edge;\n    } while (edge < num_edges_);\n  }\n\n  /// Returns the next node visited by following the edge",
+        ),
+        (
+            "thirdparty/tesseract/src/dict/dawg.h",
+            "  }\n  /// Goes through all the edges and clears each one out.\n  inline void clear_all_edges() {\n    for (int edge = 0; edge < num_edges_; edge++) {\n      set_empty_edge(edge);\n    }\n  }",
+            "  }\n  /// Goes through all the edges and clears each one out.\n  inline void clear_all_edges() {\n    for (uint32_t edge = 0; edge < num_edges_; edge++) {\n      set_empty_edge(edge);\n    }\n  }",
+        ),
+        (
+            "thirdparty/tesseract/src/dict/dawg.h",
+            "  /// Prints the contents of the SquishedDawg.\n  void print_all(const char *msg) {\n    tprintf(\"\\n__________________________\\n%s\\n\", msg);\n    for (int i = 0; i < num_edges_; ++i) {\n      print_edge(i);\n    }\n    tprintf(\"__________________________\\n\");",
+            "  /// Prints the contents of the SquishedDawg.\n  void print_all(const char *msg) {\n    tprintf(\"\\n__________________________\\n%s\\n\", msg);\n    for (uint32_t i = 0; i < num_edges_; ++i) {\n      print_edge(i);\n    }\n    tprintf(\"__________________________\\n\");",
+        ),
+        (
+            "thirdparty/tesseract/src/dict/dawg.h",
+            "\n  // Member variables.\n  EDGE_ARRAY edges_ = nullptr;\n  int32_t num_edges_ = 0;\n  int num_forward_edges_in_node0 = 0;\n};\n",
+            "\n  // Member variables.\n  EDGE_ARRAY edges_ = nullptr;\n  uint32_t num_edges_ = 0;\n  int num_forward_edges_in_node0 = 0;\n};\n",
+        ),
+        (
+            "thirdparty/tesseract/src/lstm/plumbing.cpp",
+            "  if (!fp->DeSerialize(&size)) {\n    return false;\n  }\n  for (uint32_t i = 0; i < size; ++i) {\n    Network *network = CreateFromFile(fp);\n    if (network == nullptr) {",
+            "  if (!fp->DeSerialize(&size)) {\n    return false;\n  }\n  // Reject unreasonably large network stacks.\n  if (size > 10000) {\n    return false;\n  }\n  for (uint32_t i = 0; i < size; ++i) {\n    Network *network = CreateFromFile(fp);\n    if (network == nullptr) {",
+        ),
+        (
+            "thirdparty/tesseract/src/lstm/weightmatrix.cpp",
+            "    if (!fp->DeSerialize(&size)) {\n      return false;\n    }\n#ifdef FAST_FLOAT\n    scales_.reserve(size);\n    for (auto n = size; n > 0; n--) {",
+            "    if (!fp->DeSerialize(&size)) {\n      return false;\n    }\n    // Reject unreasonably large scale vectors.\n    if (size > 100000000) {\n      return false;\n    }\n#ifdef FAST_FLOAT\n    scales_.reserve(size);\n    for (auto n = size; n > 0; n--) {",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/serialis.h",
+            "  void set_swap(bool value) {\n    swap_ = value;\n  }\n\n  // Deserialize data.\n  bool DeSerializeSize(int32_t *data);",
+            "  void set_swap(bool value) {\n    swap_ = value;\n  }\n  // Returns the number of bytes remaining to be read.\n  size_t RemainingBytes() const {\n    return data_ != nullptr && offset_ < data_->size() ? data_->size() - offset_ : 0;\n  }\n\n  // Deserialize data.\n  bool DeSerializeSize(int32_t *data);",
+        ),
+        (
+            "thirdparty/tesseract/src/dict/dawg.cpp",
+            "    tprintf(\"Empty dawg: num_edges is 0\\n\");\n    return false;\n  }\n  Dawg::init(unicharset_size);\n\n  edges_ = new EDGE_RECORD[num_edges_];\n  if (!file->DeSerialize(&edges_[0], num_edges_)) {\n    return false;\n  }\n  if (debug_level_ > 2) {\n    tprintf(\"type: %d lang: %s perm: %d unicharset_size: %d num_edges: %\" PRIu32 \"\\n\",\n            type_, lang_.c_str(), perm_, unicharset_size_, num_edges_);",
+            "    tprintf(\"Empty dawg: num_edges is 0\\n\");\n    return false;\n  }\n  // Reject if the declared edge count exceeds the remaining component bytes.\n  if (num_edges_ > file->RemainingBytes() / sizeof(EDGE_RECORD)) {\n    tprintf(\"Dawg num_edges %u exceeds remaining data\\n\", num_edges_);\n    return false;\n  }\n  Dawg::init(unicharset_size);\n\n  edges_ = new EDGE_RECORD[num_edges_];\n  if (!file->DeSerialize(&edges_[0], num_edges_)) {\n    return false;\n  }\n  // Validate the loaded edge structure: check that next_node values are in\n  // bounds and that forward edge runs are properly terminated.\n  for (uint32_t i = 0; i < num_edges_; ++i) {\n    if (edges_[i] == next_node_mask_) {\n      continue; // Empty slot.\n    }\n    NODE_REF next = next_node_from_edge_rec(edges_[i]);\n    if (next != 0 && static_cast<uint32_t>(next) >= num_edges_) {\n      tprintf(\"Dawg edge %u has out-of-bounds next_node\\n\", i);\n      return false;\n    }\n    if (forward_edge(i)) {\n      uint32_t j = i;\n      bool terminated = false;\n      do {\n        if (last_edge(j)) {\n          terminated = true;\n          break;\n        }\n        ++j;\n      } while (j < num_edges_);\n      if (!terminated) {\n        tprintf(\"Dawg forward edge run starting at %u is not terminated\\n\", i);\n        return false;\n      }\n    }\n  }\n  if (debug_level_ > 2) {\n    tprintf(\"type: %d lang: %s perm: %d unicharset_size: %d num_edges: %\" PRIu32 \"\\n\",\n            type_, lang_.c_str(), perm_, unicharset_size_, num_edges_);",
+        ),
+        (
+            "thirdparty/tesseract/src/lstm/lstm.cpp",
+            "      is_2d_ = na_ - nf_ == ni_ + 2 * ns_;\n    }\n  }\n  delete softmax_;\n  if (type_ == NT_LSTM_SOFTMAX || type_ == NT_LSTM_SOFTMAX_ENCODED) {\n    softmax_ = static_cast<FullyConnected *>(Network::CreateFromFile(fp));\n    if (softmax_ == nullptr) {\n      return false;\n    }\n  } else {\n    softmax_ = nullptr;\n  }",
+            "      is_2d_ = na_ - nf_ == ni_ + 2 * ns_;\n    }\n  }\n  // The deserialized dimensions must be mutually consistent: the forward\n  // pass sizes its buffers from na_, no_ and ns_ while the gate matrices\n  // drive their own dimensions.\n  if (na_ != ni_ + nf_ + (is_2d_ ? 2 : 1) * ns_) {\n    return false;\n  }\n  for (int w = 0; w < WT_COUNT; ++w) {\n    if (w == GFS && !Is2D()) {\n      continue;\n    }\n    if (gate_weights_[w].Dim1() != ns_ || gate_weights_[w].Dim2() != na_ + 1) {\n      return false;\n    }\n  }\n  if ((type_ == NT_LSTM || type_ == NT_LSTM_SUMMARY) && ns_ != no_) {\n    return false;\n  }\n  delete softmax_;\n  if (type_ == NT_LSTM_SOFTMAX || type_ == NT_LSTM_SOFTMAX_ENCODED) {\n    softmax_ = static_cast<FullyConnected *>(Network::CreateFromFile(fp));\n    if (softmax_ == nullptr) {\n      return false;\n    }\n    if (softmax_->NumInputs() != ns_ || softmax_->NumOutputs() != no_) {\n      return false;\n    }\n  } else {\n    softmax_ = nullptr;\n  }",
+        ),
+        (
+            "thirdparty/tesseract/src/lstm/networkio.cpp",
+            "\n// Adds part of a single timestep to floats.\nvoid NetworkIO::AddTimeStepPart(int t, int offset, int num_features, float *inout) const {\n  if (int_mode_) {\n    const int8_t *line = i_[t] + offset;\n    for (int i = 0; i < num_features; ++i) {",
+            "\n// Adds part of a single timestep to floats.\nvoid NetworkIO::AddTimeStepPart(int t, int offset, int num_features, float *inout) const {\n  ASSERT_HOST(offset + num_features <= NumFeatures());\n  if (int_mode_) {\n    const int8_t *line = i_[t] + offset;\n    for (int i = 0; i < num_features; ++i) {",
+        ),
+        (
+            "thirdparty/tesseract/src/lstm/networkio.cpp",
+            "// Writes a single timestep from floats in the range [-1, 1] writing only\n// num_features elements of input to (*this)[t], starting at offset.\nvoid NetworkIO::WriteTimeStepPart(int t, int offset, int num_features, const TFloat *input) {\n  if (int_mode_) {\n    int8_t *line = i_[t] + offset;\n    for (int i = 0; i < num_features; ++i) {",
+            "// Writes a single timestep from floats in the range [-1, 1] writing only\n// num_features elements of input to (*this)[t], starting at offset.\nvoid NetworkIO::WriteTimeStepPart(int t, int offset, int num_features, const TFloat *input) {\n  ASSERT_HOST(offset + num_features <= NumFeatures());\n  if (int_mode_) {\n    int8_t *line = i_[t] + offset;\n    for (int i = 0; i < num_features; ++i) {",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/unicharcompress.cpp",
+            "  for (unsigned c = 0; c < encoder_.size(); ++c) {\n    const RecodedCharID &code = encoder_[c];\n    decoder_[code] = c;\n    is_valid_start_[code(0)] = true;\n    RecodedCharID prefix = code;\n    int len = code.length() - 1;",
+            "  for (unsigned c = 0; c < encoder_.size(); ++c) {\n    const RecodedCharID &code = encoder_[c];\n    decoder_[code] = c;\n    ASSERT_HOST(code(0) >= 0 && code(0) < code_range_);\n    is_valid_start_[code(0)] = true;\n    RecodedCharID prefix = code;\n    int len = code.length() - 1;",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/unicharcompress.h",
+            "    if (length_ > kMaxCodeLen) {\n      return false;\n    }\n    return fp->DeSerialize(&code_[0], length_);\n  }\n  bool operator==(const RecodedCharID &other) const {\n    if (length_ != other.length_) {",
+            "    if (length_ > kMaxCodeLen) {\n      return false;\n    }\n    if (!fp->DeSerialize(&code_[0], length_)) {\n      return false;\n    }\n    // Code values index arrays sized from the maximum code; reject values\n    // that are out of the sane range for a recoded alphabet.\n    for (uint32_t i = 0; i < length_; ++i) {\n      if (code_[i] < 0 || code_[i] >= static_cast<int32_t>(UINT16_MAX)) {\n        return false;\n      }\n    }\n    return true;\n  }\n  bool operator==(const RecodedCharID &other) const {\n    if (length_ != other.length_) {",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/unicharcompress.h",
+            "  int DecodeUnichar(const RecodedCharID &code) const;\n  // Returns true if the given code is a valid start or single code.\n  bool IsValidFirstCode(int code) const {\n    return is_valid_start_[code];\n  }\n  // Returns a list of valid non-final next codes for a given prefix code,",
+            "  int DecodeUnichar(const RecodedCharID &code) const;\n  // Returns true if the given code is a valid start or single code.\n  bool IsValidFirstCode(int code) const {\n    ASSERT_HOST(code >= 0 && code < code_range_);\n    return is_valid_start_[code];\n  }\n  // Returns a list of valid non-final next codes for a given prefix code,",
+        ),
+    ];
+
+    for &(rel_path, old, new) in tesseract_patches {
+        let path = build_dir.join(rel_path);
+        let mut source = fs::read_to_string(&path)
+            .map_err(|e| format!("Unable to read {}: {e}", path.display()))?;
+        source = source.replace("\r\n", "\n");
+        if !source.contains(new) {
+            if !source.contains(old) {
+                Err(format!(
+                    "Unable to patch {rel_path} in {}: neither the unpatched code nor the fix was found",
+                    path.display()
+                ))?;
+            }
+            source = source.replacen(old, new, 1);
+            fs::write(&path, source)
+                .map_err(|e| format!("Unable to write {}: {e}", path.display()))?;
+        }
+    }
+
     Ok(())
 }
 
