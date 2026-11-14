@@ -231,6 +231,30 @@ fn patch_mupdf_sources(build_dir: &Path) -> Result<()> {
         fs::write(&path, source).map_err(|e| format!("Unable to write {}: {e}", path.display()))?;
     }
 
+    // Little CMS calculates the total number of nodes in CubeSize with a 32-bit
+    // integer, and only checked for overflow after multiplying. Fixed upstream
+    // in mm2/Little-CMS da6110b1d14abc394633a388209abd5ebedd7ab0 and
+    // e0641b1828d0a1af5ecb1b11fe22f24fceefd4bc. This is that change, word for word.
+    // A build that can apply neither it nor find it already applied fails:
+    // silently building without the check is worse than not building.
+    let path = build_dir.join("thirdparty/lcms2/src/cmslut.c");
+    let mut source =
+        fs::read_to_string(&path).map_err(|e| format!("Unable to read {}: {e}", path.display()))?;
+    source = source.replace("\r\n", "\n");
+
+    let old = "cmsUInt32Number CubeSize(const cmsUInt32Number Dims[], cmsUInt32Number b)\n{\n    cmsUInt32Number rv, dim;\n\n    _cmsAssert(Dims != NULL);\n\n    for (rv = 1; b > 0; b--) {\n\n        dim = Dims[b-1];\n        if (dim <= 1) return 0;  // Error\n\n        rv *= dim;\n\n        // Check for overflow\n        if (rv > UINT_MAX / dim) return 0;\n    }\n\n    // Again, prevent overflow\n    if (rv > UINT_MAX / 15) return 0;\n\n    return rv;\n}\n";
+    let new = "cmsUInt32Number CubeSize(const cmsUInt32Number Dims[], cmsUInt32Number b)\n{\n    cmsUInt32Number dim;\n    cmsUInt64Number rv;\n\n    _cmsAssert(Dims != NULL);\n\n    for (rv = 1; b > 0; b--) {\n\n        dim = Dims[b-1];\n        if (dim <= 1) return 0;  \n\n        // Check for overflow\n        if (rv > UINT_MAX / dim) return 0;\n\n        rv *= dim;\n    }\n\n    // Again, prevent overflow\n    if (rv > UINT_MAX / 15) return 0;\n\n    return (cmsUInt32Number) rv;\n}\n";
+    if !source.contains(new) {
+        if !source.contains(old) {
+            Err(format!(
+                "Unable to patch CubeSize in {}: neither the unpatched calculation nor the fix was found",
+                path.display()
+            ))?;
+        }
+        source = source.replacen(old, new, 1);
+        fs::write(&path, source).map_err(|e| format!("Unable to write {}: {e}", path.display()))?;
+    }
+
     Ok(())
 }
 
