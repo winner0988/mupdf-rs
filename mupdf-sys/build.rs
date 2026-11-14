@@ -261,6 +261,7 @@ fn patch_mupdf_sources(build_dir: &Path) -> Result<()> {
     // tesseract-ocr/tesseract:
     // - 82727cc11c34eaf1249af002d69f6bbae70993b9
     // - 55287a94b8044c05ce3fd10f5aca6ebbd238e518
+    // - 103dc134eb36411ddc6833ec20aa2c76795bd0ff (adds WeightMatrix::Dim1()/Dim2() needed by b494ac18)
     // - b494ac18925f9d9aff9ef5815475de9943ab19bf
     // - c94a5532ee04db5a4919542832fd94caee5ea58f
     // These are those changes, word for word. A build that can apply neither
@@ -294,8 +295,8 @@ fn patch_mupdf_sources(build_dir: &Path) -> Result<()> {
         ),
         (
             "thirdparty/tesseract/src/ccutil/serialis.cpp",
-            "  uint32_t size;\n  if (!DeSerialize(&size)) {\n    return false;\n  } else if (size > 0) {\n    // TODO: optimize.\n    data.resize(size);",
-            "  uint32_t size;\n  if (!DeSerialize(&size)) {\n    return false;\n  } else if (size > 50000000) {\n    // Arbitrarily limit the size to protect against bad data.\n    return false;\n  } else if (size > 0) {\n    // TODO: optimize.\n    data.resize(size);",
+            "bool TFile::DeSerialize(std::vector<char> &data) {\n  uint32_t size;\n  if (!DeSerialize(&size)) {\n    return false;\n  } else if (size > 0) {\n    // TODO: optimize.\n    data.resize(size);",
+            "bool TFile::DeSerialize(std::vector<char> &data) {\n  uint32_t size;\n  if (!DeSerialize(&size)) {\n    return false;\n  } else if (size > 50000000) {\n    // Arbitrarily limit the size to protect against bad data.\n    return false;\n  } else if (size > 0) {\n    // TODO: optimize.\n    data.resize(size);",
         ),
         (
             "thirdparty/tesseract/src/ccutil/tessdatamanager.cpp",
@@ -408,6 +409,16 @@ fn patch_mupdf_sources(build_dir: &Path) -> Result<()> {
             "    tprintf(\"Empty dawg: num_edges is 0\\n\");\n    return false;\n  }\n  // Reject if the declared edge count exceeds the remaining component bytes.\n  if (num_edges_ > file->RemainingBytes() / sizeof(EDGE_RECORD)) {\n    tprintf(\"Dawg num_edges %u exceeds remaining data\\n\", num_edges_);\n    return false;\n  }\n  Dawg::init(unicharset_size);\n\n  edges_ = new EDGE_RECORD[num_edges_];\n  if (!file->DeSerialize(&edges_[0], num_edges_)) {\n    return false;\n  }\n  // Validate the loaded edge structure: check that next_node values are in\n  // bounds and that forward edge runs are properly terminated.\n  for (uint32_t i = 0; i < num_edges_; ++i) {\n    if (edges_[i] == next_node_mask_) {\n      continue; // Empty slot.\n    }\n    NODE_REF next = next_node_from_edge_rec(edges_[i]);\n    if (next != 0 && static_cast<uint32_t>(next) >= num_edges_) {\n      tprintf(\"Dawg edge %u has out-of-bounds next_node\\n\", i);\n      return false;\n    }\n    if (forward_edge(i)) {\n      uint32_t j = i;\n      bool terminated = false;\n      do {\n        if (last_edge(j)) {\n          terminated = true;\n          break;\n        }\n        ++j;\n      } while (j < num_edges_);\n      if (!terminated) {\n        tprintf(\"Dawg forward edge run starting at %u is not terminated\\n\", i);\n        return false;\n      }\n    }\n  }\n  if (debug_level_ > 2) {\n    tprintf(\"type: %d lang: %s perm: %d unicharset_size: %d num_edges: %\" PRIu32 \"\\n\",\n            type_, lang_.c_str(), perm_, unicharset_size_, num_edges_);",
         ),
         (
+            "thirdparty/tesseract/src/lstm/weightmatrix.h",
+            "  int NumOutputs() const {\n    return int_mode_ ? wi_.dim1() : wf_.dim1();\n  }\n  // Provides one set of weights. Only used by peep weight maxpool.",
+            "  int NumOutputs() const {\n    return int_mode_ ? wi_.dim1() : wf_.dim1();\n  }\n  // The dimensions of the active weight matrix (wi_ in int mode, else wf_).\n  int Dim1() const {\n    return int_mode_ ? wi_.dim1() : wf_.dim1();\n  }\n  int Dim2() const {\n    return int_mode_ ? wi_.dim2() : wf_.dim2();\n  }\n  // Provides one set of weights. Only used by peep weight maxpool.",
+        ),
+        (
+            "thirdparty/tesseract/src/lstm/fullyconnected.cpp",
+            "// Reads from the given file. Returns false in case of error.\nbool FullyConnected::DeSerialize(TFile *fp) {\n  return weights_.DeSerialize(IsTraining(), fp);\n}",
+            "// Reads from the given file. Returns false in case of error.\nbool FullyConnected::DeSerialize(TFile *fp) {\n  if (!weights_.DeSerialize(IsTraining(), fp)) {\n    return false;\n  }\n  // The weight matrix must match the declared sizes (the second dimension\n  // includes the bias column); otherwise Forward would read or write\n  // outside the scratch buffers sized from ni_ and no_.\n  if (weights_.Dim1() != no_ || weights_.Dim2() != ni_ + 1) {\n    return false;\n  }\n  return true;\n}",
+        ),
+        (
             "thirdparty/tesseract/src/lstm/lstm.cpp",
             "      is_2d_ = na_ - nf_ == ni_ + 2 * ns_;\n    }\n  }\n  delete softmax_;\n  if (type_ == NT_LSTM_SOFTMAX || type_ == NT_LSTM_SOFTMAX_ENCODED) {\n    softmax_ = static_cast<FullyConnected *>(Network::CreateFromFile(fp));\n    if (softmax_ == nullptr) {\n      return false;\n    }\n  } else {\n    softmax_ = nullptr;\n  }",
             "      is_2d_ = na_ - nf_ == ni_ + 2 * ns_;\n    }\n  }\n  // The deserialized dimensions must be mutually consistent: the forward\n  // pass sizes its buffers from na_, no_ and ns_ while the gate matrices\n  // drive their own dimensions.\n  if (na_ != ni_ + nf_ + (is_2d_ ? 2 : 1) * ns_) {\n    return false;\n  }\n  for (int w = 0; w < WT_COUNT; ++w) {\n    if (w == GFS && !Is2D()) {\n      continue;\n    }\n    if (gate_weights_[w].Dim1() != ns_ || gate_weights_[w].Dim2() != na_ + 1) {\n      return false;\n    }\n  }\n  if ((type_ == NT_LSTM || type_ == NT_LSTM_SUMMARY) && ns_ != no_) {\n    return false;\n  }\n  delete softmax_;\n  if (type_ == NT_LSTM_SOFTMAX || type_ == NT_LSTM_SOFTMAX_ENCODED) {\n    softmax_ = static_cast<FullyConnected *>(Network::CreateFromFile(fp));\n    if (softmax_ == nullptr) {\n      return false;\n    }\n    if (softmax_->NumInputs() != ns_ || softmax_->NumOutputs() != no_) {\n      return false;\n    }\n  } else {\n    softmax_ = nullptr;\n  }",
@@ -444,16 +455,18 @@ fn patch_mupdf_sources(build_dir: &Path) -> Result<()> {
         let mut source = fs::read_to_string(&path)
             .map_err(|e| format!("Unable to read {}: {e}", path.display()))?;
         source = source.replace("\r\n", "\n");
-        if !source.contains(new) {
-            if !source.contains(old) {
-                Err(format!(
-                    "Unable to patch {rel_path} in {}: neither the unpatched code nor the fix was found",
-                    path.display()
-                ))?;
-            }
+        let count = source.matches(old).count();
+        if count == 1 {
             source = source.replacen(old, new, 1);
             fs::write(&path, source)
                 .map_err(|e| format!("Unable to write {}: {e}", path.display()))?;
+        } else if count == 0 && source.contains(new) {
+            // Already applied.
+        } else {
+            Err(format!(
+                "Unable to patch {rel_path} in {}: expected 1 occurrence of unpatched code, found {count}",
+                path.display()
+            ))?;
         }
     }
 
