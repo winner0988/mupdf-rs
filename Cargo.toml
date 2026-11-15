@@ -99,9 +99,9 @@ bitflags = "2.0.2"
 percent-encoding = "2.3.1"
 serde = { version = "1.0.201", features = ["derive"], optional = true }
 zerocopy = { version = "0.8.17", features = ["derive"] }
-mupdf-fonts-droid = { version = "0.8.0", path = "mupdf-fonts-droid", optional = true }
-mupdf-fonts-noto = { version = "0.8.0", path = "mupdf-fonts-noto", optional = true }
-mupdf-fonts-sil = { version = "0.8.0", path = "mupdf-fonts-sil", optional = true }
+mupdf-fonts-droid = { version = "0.8.0", optional = true }
+mupdf-fonts-noto = { version = "0.8.0", optional = true }
+mupdf-fonts-sil = { version = "0.8.0", optional = true }
 
 [target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))'.dependencies]
 font-kit = { version = "0.14.1", optional = true }
