@@ -626,6 +626,9 @@ impl Build {
         self.fz_enable("JS", js);
         self.fz_enable("BROTLI", brotli);
         self.fz_enable("DOCX_OUTPUT", docx_output);
+        // MuPDF 1.28 adds a Markdown reader (FZ_ENABLE_MD, on by default) that also
+        // guesses Markdown from file contents. No feature of this crate asks for it.
+        self.fz_enable("MD", false);
 
         // gates which features get built
         self.make_bool("xps", xps);
