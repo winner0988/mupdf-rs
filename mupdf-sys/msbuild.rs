@@ -118,6 +118,8 @@ impl Msbuild {
 
         println!("cargo:rustc-link-lib=dylib=libmupdf");
         println!("cargo:rustc-link-lib=dylib=libthirdparty");
+        // MuPDF 1.28 seeds its random numbers with CryptGenRandom, which is in advapi32.
+        println!("cargo:rustc-link-lib=dylib=advapi32");
 
         Ok(())
     }

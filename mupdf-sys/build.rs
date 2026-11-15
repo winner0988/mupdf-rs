@@ -206,8 +206,8 @@ fn patch_mupdf_sources(build_dir: &Path) -> Result<()> {
         }
     }
 
-    // OpenJPEG 與 lcms2 的修正已經在 MuPDF 1.28.6 內附的版本裡。
-    // Tesseract 5.5.0 lacks bounds checking on count and length fields read
+    // The OpenJPEG and lcms2 fixes are already in the versions bundled with MuPDF 1.28.6.
+    // Tesseract 5.5.2 lacks bounds checking on count and length fields read
     // from traineddata files before allocating or indexing arrays, as well as
     // LSTM gate matrix and recoder sanity checks. Fixed upstream in
     // tesseract-ocr/tesseract:
@@ -400,7 +400,327 @@ fn patch_mupdf_sources(build_dir: &Path) -> Result<()> {
             "  int DecodeUnichar(const RecodedCharID &code) const;\n  // Returns true if the given code is a valid start or single code.\n  bool IsValidFirstCode(int code) const {\n    return is_valid_start_[code];\n  }\n  // Returns a list of valid non-final next codes for a given prefix code,",
             "  int DecodeUnichar(const RecodedCharID &code) const;\n  // Returns true if the given code is a valid start or single code.\n  bool IsValidFirstCode(int code) const {\n    ASSERT_HOST(code >= 0 && code < code_range_);\n    return is_valid_start_[code];\n  }\n  // Returns a list of valid non-final next codes for a given prefix code,",
         ),
+        // Additional upstream Tesseract language-data validation checks from
+        // 5.5.3 and 5.5.4 (#577). Applied in order:
+        // - 6db4e78940bb4faa2d5f445064720faca35a4b47
+        // - 3a3fe8d7f4c10b3d159939d2a3cbb8b6e680ab84
+        // - db9866a4bb16e88cb9354861862dabee841af628
+        // - 7e61e3457de8809fbc60400d82690b8e9e46be2e
+        // - 230b6132926e5b774de1d2ba5f66013076f14a79
+        // - 289f72664cb51a1476a0869cb027fe53be1f3e01
+        // - 2da83fd880b508c9f7e667b43f4aa230effd045b
+        // - d2d7dcbe8eaed4889a3f4711a97c65d650aa4caa
+        // - 2f4d2f4bf45c363785d7bf1da29b6628f8939a72
+        // - 2d04d640db2e8c7e3bab2369d599343b5a8b8443
+        // - 552771236b0d80cbdb0c7dd856120fa21a4672e5
+        // - 76865fa087c15f5ea2f75f697993fc3b05eabaf2
+        // - 309f963f50bd3e6732654a114550d7d32da6c278
+        // - 8bde475d4792ba0d4d5bd7b7259b5405613770a5
+        // - 048e92378f1a34dcdaf94bc515c7552ac01f08ef
+        // - e00c98a35c3bf829b7a8a9d0147ab00e44f11b3b
+        // - 416fa815095f383b9113f7a436fa3a385b488b8e
+        // - ac0f85c2ee6a242c169a404978f0be8877bc05b7
+        // - 0000341a396c1cfb6cec414a6732dd4ce68531c3
+        // - 15879257e1afc87ccf21845a417bfccd3effee83
+        // - cd3647052ec511ea9ab6ef9116977a014b46bc73
+        // - ef24f875c3e306211137d5e7de76691c5faac8ea
+        // Except for the hunk in 7e61e345 in SetupDecoder (where the context includes
+        // the ASSERT_HOST line added by c94a5532, producing results identical to 5.5.4),
+        // these are verbatim upstream changes.
+        // Four upstream commits are intentionally omitted because they only touch code
+        // that MuPDF does not build:
+        // - 1bda5079b1c8a7e25f523486837426903d29ce84 (normmatch.cpp)
+        // - 8b0574680f3b22f246ade6a4c8e3029104255c63 (legacy engine in src/classify/)
+        // - 56e09ca12e751623fe796ce1554ce704bffd2ef0 (GenericVector::read, only called by intproto.cpp)
+        // - c053424327352b9d5180aa7540c1f9e67c64f27e (FAST_FLOAT branches)
+        (
+            "thirdparty/tesseract/src/ccmain/tessedit.cpp",
+            "      lstm_recognizer_ = new LSTMRecognizer(language_data_path_prefix.c_str());\n      ASSERT_HOST(lstm_recognizer_->Load(this->params(), lstm_use_matrix ? language : \"\", mgr));\n    } else {\n      tprintf(\"Error: LSTM requested, but not present!! Loading tesseract.\\n\");\n      tessedit_ocr_engine_mode.set_value(OEM_TESSERACT_ONLY);\n    }\n  }\n\n",
+            "      lstm_recognizer_ = new LSTMRecognizer(language_data_path_prefix.c_str());\n      ASSERT_HOST(lstm_recognizer_->Load(this->params(), lstm_use_matrix ? language : \"\", mgr));\n    } else {\n#ifdef DISABLED_LEGACY_ENGINE\n      tprintf(\n          \"Error: LSTM requested, but not present in %s; the legacy \"\n          \"engine is disabled in this build, so there is no fallback.\\n\",\n          tessdata_path.c_str());\n      return false;\n#else\n      tprintf(\"Error: LSTM requested, but not present!! Loading tesseract.\\n\");\n      tessedit_ocr_engine_mode.set_value(OEM_TESSERACT_ONLY);\n#endif // DISABLED_LEGACY_ENGINE\n    }\n  }\n\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccmain/tessedit.cpp",
+            "      ASSERT_HOST(lstm_recognizer_->Load(this->params(), lstm_use_matrix ? language : \"\", mgr));\n    } else {\n#ifdef DISABLED_LEGACY_ENGINE\n      tprintf(\n          \"Error: LSTM requested, but not present in %s; the legacy \"\n          \"engine is disabled in this build, so there is no fallback.\\n\",\n",
+            "      ASSERT_HOST(lstm_recognizer_->Load(this->params(), lstm_use_matrix ? language : \"\", mgr));\n    } else {\n#ifdef DISABLED_LEGACY_ENGINE\n      // The legacy engine is compiled out, so we cannot fall back to it.\n      // Returning false here propagates a load failure to init_tesseract,\n      // which logs \"Failed loading language '%s'\" and skips this language.\n      tprintf(\n          \"Error: LSTM requested, but not present in %s; the legacy \"\n          \"engine is disabled in this build, so there is no fallback.\\n\",\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccstruct/fontinfo.cpp",
+            "  if (vec_size == 0) {\n    return true;\n  }\n  fi->init_spacing(vec_size);\n  for (uint32_t i = 0; i < vec_size; ++i) {\n    auto *fs = new FontSpacingInfo();\n",
+            "  if (vec_size == 0) {\n    return true;\n  }\n  // Reject unreasonably large spacing vectors.\n  if (vec_size > 1000000) {\n    return false;\n  }\n  fi->init_spacing(vec_size);\n  for (uint32_t i = 0; i < vec_size; ++i) {\n    auto *fs = new FontSpacingInfo();\n",
+        ),
+        (
+            "thirdparty/tesseract/src/dict/dawg.cpp",
+            "#include \"helpers.h\"\n#include \"tprintf.h\"\n\n#include <memory>\n\n/*----------------------------------------------------------------------\n",
+            "#include \"helpers.h\"\n#include \"tprintf.h\"\n\n#include <climits>\n#include <memory>\n\n/*----------------------------------------------------------------------\n",
+        ),
+        (
+            "thirdparty/tesseract/src/dict/dawg.cpp",
+            "        return;\n      }\n      if (last_edge(edge)) {\n        break;\n      }\n      ++edge;\n",
+            "        return;\n      }\n      if (last_edge(edge)) {\n        ++edge; // Advance past the last forward edge.\n        break;\n      }\n      ++edge;\n",
+        ),
+        (
+            "thirdparty/tesseract/src/dict/dawg.cpp",
+            "  if (!file->DeSerialize(&unicharset_size)) {\n    return false;\n  }\n  if (!file->DeSerialize(&num_edges_)) {\n    return false;\n  }\n",
+            "  if (!file->DeSerialize(&unicharset_size)) {\n    return false;\n  }\n  // Dawg::init takes int; reject values that would overflow.\n  if (unicharset_size == 0 || unicharset_size > INT_MAX) {\n    tprintf(\"Bad dawg unicharset_size %u\\n\", unicharset_size);\n    return false;\n  }\n  if (!file->DeSerialize(&num_edges_)) {\n    return false;\n  }\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/serialis.cpp",
+            "}\n\nbool TFile::Skip(size_t count) {\n  offset_ += count;\n  return true;\n}\n",
+            "}\n\nbool TFile::Skip(size_t count) {\n  if (data_ != nullptr && offset_ + count > data_->size()) {\n    offset_ = data_->size();\n    return false;\n  }\n  offset_ += count;\n  return true;\n}\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/unicharcompress.cpp",
+            "        // Add the direct_set unichar-ids of the unicodes in sequence to the\n        // code.\n        for (int uni : unicodes) {\n          int position = code.length();\n          if (position >= RecodedCharID::kMaxCodeLen) {\n            tprintf(\"Unichar %d=%s is too long to encode!!\\n\", u, unicharset.id_to_unichar(u));\n            return false;\n",
+            "        // Add the direct_set unichar-ids of the unicodes in sequence to the\n        // code.\n        for (int uni : unicodes) {\n          uint32_t position = code.length();\n          if (position >= RecodedCharID::kMaxCodeLen) {\n            tprintf(\"Unichar %d=%s is too long to encode!!\\n\", u, unicharset.id_to_unichar(u));\n            return false;\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/unicharcompress.cpp",
+            "  std::vector<int> offsets(code_range_);\n  // Find which codes are used\n  for (auto &code : encoder_) {\n    for (int i = 0; i < code.length(); ++i) {\n      offsets[code(i)] = 1;\n    }\n  }\n",
+            "  std::vector<int> offsets(code_range_);\n  // Find which codes are used\n  for (auto &code : encoder_) {\n    for (uint32_t i = 0; i < code.length(); ++i) {\n      offsets[code(i)] = 1;\n    }\n  }\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/unicharcompress.cpp",
+            "// Decodes code, returning the original unichar-id, or\n// INVALID_UNICHAR_ID if the input is invalid.\nint UnicharCompress::DecodeUnichar(const RecodedCharID &code) const {\n  int len = code.length();\n  if (len <= 0 || len > RecodedCharID::kMaxCodeLen) {\n    return INVALID_UNICHAR_ID;\n  }\n  auto it = decoder_.find(code);\n",
+            "// Decodes code, returning the original unichar-id, or\n// INVALID_UNICHAR_ID if the input is invalid.\nint UnicharCompress::DecodeUnichar(const RecodedCharID &code) const {\n  uint32_t len = code.length();\n  if (len == 0 || len > RecodedCharID::kMaxCodeLen) {\n    return INVALID_UNICHAR_ID;\n  }\n  auto it = decoder_.find(code);\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/unicharcompress.cpp",
+            "      continue;\n    }\n    encoding += std::to_string(code(0));\n    for (int i = 1; i < code.length(); ++i) {\n      encoding += \",\" + std::to_string(code(i));\n    }\n    encoding += \"\\t\";\n",
+            "      continue;\n    }\n    encoding += std::to_string(code(0));\n    for (uint32_t i = 1; i < code.length(); ++i) {\n      encoding += \",\" + std::to_string(code(i));\n    }\n    encoding += \"\\t\";\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/unicharcompress.cpp",
+            "void UnicharCompress::ComputeCodeRange() {\n  code_range_ = -1;\n  for (auto &code : encoder_) {\n    for (int i = 0; i < code.length(); ++i) {\n      if (code(i) > code_range_) {\n        code_range_ = code(i);\n      }\n",
+            "void UnicharCompress::ComputeCodeRange() {\n  code_range_ = -1;\n  for (auto &code : encoder_) {\n    for (uint32_t i = 0; i < code.length(); ++i) {\n      if (code(i) > code_range_) {\n        code_range_ = code(i);\n      }\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/unicharcompress.cpp",
+            "    ASSERT_HOST(code(0) >= 0 && code(0) < code_range_);\n    is_valid_start_[code(0)] = true;\n    RecodedCharID prefix = code;\n    int len = code.length() - 1;\n    prefix.Truncate(len);\n    auto final_it = final_codes_.find(prefix);\n    if (final_it == final_codes_.end()) {\n      auto *code_list = new std::vector<int>;\n      code_list->push_back(code(len));\n      final_codes_[prefix] = code_list;\n      while (--len >= 0) {\n        prefix.Truncate(len);\n        auto next_it = next_codes_.find(prefix);\n        if (next_it == next_codes_.end()) {\n",
+            "    ASSERT_HOST(code(0) >= 0 && code(0) < code_range_);\n    is_valid_start_[code(0)] = true;\n    RecodedCharID prefix = code;\n    uint32_t len = code.length();\n    if (len == 0) {\n      continue;\n    }\n    --len;\n    prefix.Truncate(len);\n    auto final_it = final_codes_.find(prefix);\n    if (final_it == final_codes_.end()) {\n      auto *code_list = new std::vector<int>;\n      code_list->push_back(code(len));\n      final_codes_[prefix] = code_list;\n      while (len > 0) {\n        --len;\n        prefix.Truncate(len);\n        auto next_it = next_codes_.find(prefix);\n        if (next_it == next_codes_.end()) {\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/tessdatamanager.cpp",
+            "        return false;\n      }\n      entries_[i].resize(entry_size);\n      if (!fp.DeSerialize(&entries_[i][0], entry_size)) {\n        return false;\n      }\n    }\n",
+            "        return false;\n      }\n      entries_[i].resize(entry_size);\n      if (entry_size > 0 && !fp.DeSerialize(&entries_[i][0], entry_size)) {\n        return false;\n      }\n    }\n",
+        ),
+        (
+            "thirdparty/tesseract/src/dict/dawg.cpp",
+            "    tprintf(\"Empty dawg: num_edges is 0\\n\");\n    return false;\n  }\n  // Reject if the declared edge count exceeds the remaining component bytes.\n  if (num_edges_ > file->RemainingBytes() / sizeof(EDGE_RECORD)) {\n    tprintf(\"Dawg num_edges %u exceeds remaining data\\n\", num_edges_);\n",
+            "    tprintf(\"Empty dawg: num_edges is 0\\n\");\n    return false;\n  }\n  // Hard upper bound to prevent resource-exhaustion DoS.\n  if (num_edges_ > 50000000) {\n    tprintf(\"Dawg num_edges %u exceeds hard limit\\n\", num_edges_);\n    return false;\n  }\n  // Reject if the declared edge count exceeds the remaining component bytes.\n  if (num_edges_ > file->RemainingBytes() / sizeof(EDGE_RECORD)) {\n    tprintf(\"Dawg num_edges %u exceeds remaining data\\n\", num_edges_);\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/serialis.cpp",
+            "}\n\nbool TFile::Skip(size_t count) {\n  if (data_ != nullptr && offset_ + count > data_->size()) {\n    offset_ = data_->size();\n    return false;\n  }\n  offset_ += count;\n  return true;\n",
+            "}\n\nbool TFile::Skip(size_t count) {\n  if (data_ != nullptr) {\n    size_t data_size = data_->size();\n    // Subtraction-based check to avoid overflow in offset_ + count.\n    if (offset_ >= data_size || count > data_size - offset_) {\n      offset_ = data_size > UINT_MAX ? UINT_MAX : static_cast<unsigned>(data_size);\n      return false;\n    }\n  }\n  offset_ += count;\n  return true;\n",
+        ),
+        (
+            "thirdparty/tesseract/src/dict/dawg.cpp",
+            "    if (edges_[i] == next_node_mask_) {\n      continue; // Empty slot.\n    }\n    NODE_REF next = next_node_from_edge_rec(edges_[i]);\n    if (next != 0 && static_cast<uint32_t>(next) >= num_edges_) {\n      tprintf(\"Dawg edge %u has out-of-bounds next_node\\n\", i);\n      return false;\n    }\n    if (forward_edge(i)) {\n      uint32_t j = i;\n      bool terminated = false;\n      do {\n        if (last_edge(j)) {\n          terminated = true;\n          break;\n        }\n        ++j;\n",
+            "    if (edges_[i] == next_node_mask_) {\n      continue; // Empty slot.\n    }\n    if (forward_edge(i)) {\n      // Validate the entire forward-edge run and skip to its terminator.\n      bool terminated = false;\n      uint32_t j = i;\n      do {\n        NODE_REF nj = next_node_from_edge_rec(edges_[j]);\n        if (nj != 0 && static_cast<uint32_t>(nj) >= num_edges_) {\n          tprintf(\"Dawg edge %u has out-of-bounds next_node\\n\", j);\n          return false;\n        }\n        if (last_edge(j)) {\n          terminated = true;\n          i = j; // Advance outer loop past the terminator.\n          break;\n        }\n        ++j;\n",
+        ),
+        (
+            "thirdparty/tesseract/src/dict/dawg.cpp",
+            "        tprintf(\"Dawg forward edge run starting at %u is not terminated\\n\", i);\n        return false;\n      }\n    }\n  }\n  if (debug_level_ > 2) {\n",
+            "        tprintf(\"Dawg forward edge run starting at %u is not terminated\\n\", i);\n        return false;\n      }\n    } else {\n      NODE_REF next = next_node_from_edge_rec(edges_[i]);\n      if (next != 0 && static_cast<uint32_t>(next) >= num_edges_) {\n        tprintf(\"Dawg edge %u has out-of-bounds next_node\\n\", i);\n        return false;\n      }\n    }\n  }\n  if (debug_level_ > 2) {\n",
+        ),
+        (
+            "thirdparty/tesseract/src/dict/dawg.cpp",
+            "  }\n  Dawg::init(unicharset_size);\n\n  edges_ = new EDGE_RECORD[num_edges_];\n  if (!file->DeSerialize(&edges_[0], num_edges_)) {\n    return false;\n  }\n  // Validate the loaded edge structure: check that next_node values are in\n",
+            "  }\n  Dawg::init(unicharset_size);\n\n  delete[] edges_;\n  edges_ = new EDGE_RECORD[num_edges_];\n  if (!file->DeSerialize(&edges_[0], num_edges_)) {\n    delete[] edges_;\n    edges_ = nullptr;\n    num_edges_ = 0;\n    return false;\n  }\n  // Validate the loaded edge structure: check that next_node values are in\n",
+        ),
+        (
+            "thirdparty/tesseract/src/dict/dawg.cpp",
+            "        NODE_REF nj = next_node_from_edge_rec(edges_[j]);\n        if (nj != 0 && static_cast<uint32_t>(nj) >= num_edges_) {\n          tprintf(\"Dawg edge %u has out-of-bounds next_node\\n\", j);\n          return false;\n        }\n        if (last_edge(j)) {\n",
+            "        NODE_REF nj = next_node_from_edge_rec(edges_[j]);\n        if (nj != 0 && static_cast<uint32_t>(nj) >= num_edges_) {\n          tprintf(\"Dawg edge %u has out-of-bounds next_node\\n\", j);\n          delete[] edges_;\n          edges_ = nullptr;\n          num_edges_ = 0;\n          return false;\n        }\n        if (last_edge(j)) {\n",
+        ),
+        (
+            "thirdparty/tesseract/src/dict/dawg.cpp",
+            "      } while (j < num_edges_);\n      if (!terminated) {\n        tprintf(\"Dawg forward edge run starting at %u is not terminated\\n\", i);\n        return false;\n      }\n    } else {\n      NODE_REF next = next_node_from_edge_rec(edges_[i]);\n      if (next != 0 && static_cast<uint32_t>(next) >= num_edges_) {\n        tprintf(\"Dawg edge %u has out-of-bounds next_node\\n\", i);\n        return false;\n      }\n    }\n",
+            "      } while (j < num_edges_);\n      if (!terminated) {\n        tprintf(\"Dawg forward edge run starting at %u is not terminated\\n\", i);\n        delete[] edges_;\n        edges_ = nullptr;\n        num_edges_ = 0;\n        return false;\n      }\n    } else {\n      NODE_REF next = next_node_from_edge_rec(edges_[i]);\n      if (next != 0 && static_cast<uint32_t>(next) >= num_edges_) {\n        tprintf(\"Dawg edge %u has out-of-bounds next_node\\n\", i);\n        delete[] edges_;\n        edges_ = nullptr;\n        num_edges_ = 0;\n        return false;\n      }\n    }\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccstruct/fontinfo.cpp",
+            "    return false;\n  }\n  char *font_name = new char[size + 1];\n  fi->name = font_name;\n  if (!f->DeSerialize(font_name, size)) {\n    return false;\n  }\n  font_name[size] = '\\0';\n  return f->DeSerialize(&fi->properties);\n}\n",
+            "    return false;\n  }\n  char *font_name = new char[size + 1];\n  if (!f->DeSerialize(font_name, size)) {\n    delete[] font_name;\n    return false;\n  }\n  fi->name = font_name;\n  font_name[size] = '\\0';\n  return f->DeSerialize(&fi->properties);\n}\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/tessdatamanager.cpp",
+            "// Loads from the given memory buffer as if a file.\nbool TessdataManager::LoadMemBuffer(const char *name, const char *data, int size) {\n  // TODO: This method supports only the proprietary file format.\n  Clear();\n  data_file_name_ = name;\n  TFile fp;\n",
+            "// Loads from the given memory buffer as if a file.\nbool TessdataManager::LoadMemBuffer(const char *name, const char *data, int size) {\n  // TODO: This method supports only the proprietary file format.\n  if (size < 0) {\n    return false;\n  }\n  Clear();\n  data_file_name_ = name;\n  TFile fp;\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/unicharcompress.h",
+            "  }\n  // Sets the code value at the given index in the code.\n  void Set(uint32_t index, int value) {\n    code_[index] = value;\n    if (length_ <= index) {\n      length_ = index + 1;\n",
+            "  }\n  // Sets the code value at the given index in the code.\n  void Set(uint32_t index, int value) {\n    if (index >= kMaxCodeLen) {\n      return;\n    }\n    code_[index] = value;\n    if (length_ <= index) {\n      length_ = index + 1;\n",
+        ),
+        (
+            "thirdparty/tesseract/src/lstm/convolve.cpp",
+            "\n#include \"convolve.h\"\n\n#include \"networkscratch.h\"\n#include \"serialis.h\"\n\nnamespace tesseract {\n\n",
+            "\n#include \"convolve.h\"\n\n#include <cstdint>\n\n#include \"networkscratch.h\"\n#include \"serialis.h\"\n#include \"tprintf.h\"\n\nnamespace tesseract {\n\n",
+        ),
+        (
+            "thirdparty/tesseract/src/lstm/convolve.cpp",
+            "  if (!fp->DeSerialize(&half_y_)) {\n    return false;\n  }\n  no_ = ni_ * (2 * half_x_ + 1) * (2 * half_y_ + 1);\n  return true;\n}\n\n",
+            "  if (!fp->DeSerialize(&half_y_)) {\n    return false;\n  }\n  if (half_x_ < 0 || half_y_ < 0 || ni_ <= 0) {\n    tprintf(\"Error: invalid Convolve parameters: ni=%d half_x=%d half_y=%d\\n\", ni_, half_x_,\n            half_y_);\n    return false;\n  }\n  int64_t kx = 2LL * half_x_ + 1;\n  int64_t ky = 2LL * half_y_ + 1;\n  // Stepwise overflow check: ni_ * kx * ky must fit in int.\n  if (kx > INT_MAX / ky) {\n    tprintf(\"Error: Convolve output-channel count overflows: ni=%d half_x=%d half_y=%d\\n\", ni_,\n            half_x_, half_y_);\n    return false;\n  }\n  int64_t kxky = kx * ky;\n  if (static_cast<int64_t>(ni_) > INT_MAX / kxky) {\n    tprintf(\"Error: Convolve output-channel count overflows: ni=%d half_x=%d half_y=%d\\n\", ni_,\n            half_x_, half_y_);\n    return false;\n  }\n  no_ = static_cast<int>(static_cast<int64_t>(ni_) * kxky);\n  return true;\n}\n\n",
+        ),
+        (
+            "thirdparty/tesseract/src/lstm/network.cpp",
+            "  if (!fp->DeSerialize(name)) {\n    return nullptr;\n  }\n\n  switch (type) {\n    case NT_CONVOLVE:\n      network = new Convolve(name, ni, 0, 0);\n",
+            "  if (!fp->DeSerialize(name)) {\n    return nullptr;\n  }\n\n  if (ni < 0 || no < 0 || num_weights < 0) {\n    tprintf(\"Error: invalid network layer parameters: type=%d ni=%d no=%d num_weights=%d\\n\", type,\n            ni, no, num_weights);\n    return nullptr;\n  }\n\n  switch (type) {\n    case NT_CONVOLVE:\n      network = new Convolve(name, ni, 0, 0);\n",
+        ),
+        (
+            "thirdparty/tesseract/src/lstm/networkio.cpp",
+            "void NetworkIO::CopyTimeStepGeneral(int dest_t, int dest_offset, int num_features,\n                                    const NetworkIO &src, int src_t, int src_offset) {\n  ASSERT_HOST(int_mode_ == src.int_mode_);\n  if (int_mode_) {\n    memcpy(i_[dest_t] + dest_offset, src.i_[src_t] + src_offset, num_features * sizeof(i_[0][0]));\n  } else {\n",
+            "void NetworkIO::CopyTimeStepGeneral(int dest_t, int dest_offset, int num_features,\n                                    const NetworkIO &src, int src_t, int src_offset) {\n  ASSERT_HOST(int_mode_ == src.int_mode_);\n  ASSERT_HOST(dest_offset + num_features <= NumFeatures());\n  if (int_mode_) {\n    memcpy(i_[dest_t] + dest_offset, src.i_[src_t] + src_offset, num_features * sizeof(i_[0][0]));\n  } else {\n",
+        ),
+        (
+            "thirdparty/tesseract/src/lstm/networkio.cpp",
+            "\n// Sets the given range to random values.\nvoid NetworkIO::Randomize(int t, int offset, int num_features, TRand *randomizer) {\n  if (int_mode_) {\n    int8_t *line = i_[t] + offset;\n    for (int i = 0; i < num_features; ++i) {\n",
+            "\n// Sets the given range to random values.\nvoid NetworkIO::Randomize(int t, int offset, int num_features, TRand *randomizer) {\n  ASSERT_HOST(offset + num_features <= NumFeatures());\n  if (int_mode_) {\n    int8_t *line = i_[t] + offset;\n    for (int i = 0; i < num_features; ++i) {\n",
+        ),
+        (
+            "thirdparty/tesseract/src/lstm/reconfig.cpp",
+            "\n#include \"reconfig.h\"\n\nnamespace tesseract {\n\nReconfig::Reconfig(const std::string &name, int ni, int x_scale, int y_scale)\n",
+            "\n#include \"reconfig.h\"\n\n#include <cstdint>\n\n#include \"tprintf.h\"\n\nnamespace tesseract {\n\nReconfig::Reconfig(const std::string &name, int ni, int x_scale, int y_scale)\n",
+        ),
+        (
+            "thirdparty/tesseract/src/lstm/reconfig.cpp",
+            "  if (!fp->DeSerialize(&y_scale_)) {\n    return false;\n  }\n  no_ = ni_ * x_scale_ * y_scale_;\n  return true;\n}\n\n",
+            "  if (!fp->DeSerialize(&y_scale_)) {\n    return false;\n  }\n  if (x_scale_ <= 0 || y_scale_ <= 0 || ni_ <= 0) {\n    tprintf(\"Error: invalid Reconfig parameters: ni=%d x_scale=%d y_scale=%d\\n\", ni_, x_scale_,\n            y_scale_);\n    return false;\n  }\n  int64_t xs = x_scale_;\n  int64_t ys = y_scale_;\n  // Stepwise overflow check: ni_ * x_scale_ * y_scale_ must fit in int.\n  int64_t xsys = xs * ys;\n  if (static_cast<int64_t>(ni_) > INT_MAX / xsys) {\n    tprintf(\"Error: Reconfig output-channel count overflows: ni=%d x_scale=%d y_scale=%d\\n\", ni_,\n            x_scale_, y_scale_);\n    return false;\n  }\n  no_ = static_cast<int>(static_cast<int64_t>(ni_) * xsys);\n  return true;\n}\n\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/unicharset.cpp",
+            "      sscanf(buffer, \"%d\", &unicharset_size) != 1) {\n    return false;\n  }\n  for (UNICHAR_ID id = 0; id < unicharset_size; ++id) {\n    char unichar[256];\n    unsigned int properties;\n",
+            "      sscanf(buffer, \"%d\", &unicharset_size) != 1) {\n    return false;\n  }\n  if (unicharset_size <= 0) {\n    return false;\n  }\n  for (UNICHAR_ID id = 0; id < unicharset_size; ++id) {\n    char unichar[256];\n    unsigned int properties;\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/unicharset.cpp",
+            "    } else {\n      this->unichar_insert_backwards_compatible(unichar);\n    }\n\n    this->set_isalpha(id, properties & ISALPHA_MASK);\n    this->set_islower(id, properties & ISLOWER_MASK);\n",
+            "    } else {\n      this->unichar_insert_backwards_compatible(unichar);\n    }\n    // A duplicate or empty representation makes the insert a no-op,\n    // desynchronizing id from the unichars vector; the set_* calls and\n    // unichars[id] below would then write out of bounds. The file is\n    // malformed, so reject it.\n    if (size() != static_cast<size_t>(id) + 1) {\n      fprintf(stderr, \"%s:%d unichar %d has a duplicate or empty representation\\n\",\n              __FILE__, __LINE__, id);\n      return false;\n    }\n\n    this->set_isalpha(id, properties & ISALPHA_MASK);\n    this->set_islower(id, properties & ISLOWER_MASK);\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccmain/tessedit.cpp",
+            "#endif // ndef DISABLED_LEGACY_ENGINE\n    if (mgr->IsComponentAvailable(TESSDATA_LSTM)) {\n      lstm_recognizer_ = new LSTMRecognizer(language_data_path_prefix.c_str());\n      ASSERT_HOST(lstm_recognizer_->Load(this->params(), lstm_use_matrix ? language : \"\", mgr));\n    } else {\n#ifdef DISABLED_LEGACY_ENGINE\n      // The legacy engine is compiled out, so we cannot fall back to it.\n",
+            "#endif // ndef DISABLED_LEGACY_ENGINE\n    if (mgr->IsComponentAvailable(TESSDATA_LSTM)) {\n      lstm_recognizer_ = new LSTMRecognizer(language_data_path_prefix.c_str());\n      if (!lstm_recognizer_->Load(this->params(), lstm_use_matrix ? language : \"\", mgr)) {\n        delete lstm_recognizer_;\n        lstm_recognizer_ = nullptr;\n        tprintf(\"Error: Failed to load the LSTM model from %s\\n\", tessdata_path.c_str());\n        return false;\n      }\n    } else {\n#ifdef DISABLED_LEGACY_ENGINE\n      // The legacy engine is compiled out, so we cannot fall back to it.\n",
+        ),
+        (
+            "thirdparty/tesseract/src/lstm/plumbing.cpp",
+            "  if (size > 10000) {\n    return false;\n  }\n  for (uint32_t i = 0; i < size; ++i) {\n    Network *network = CreateFromFile(fp);\n    if (network == nullptr) {\n",
+            "  if (size > 10000) {\n    return false;\n  }\n  // Reject empty stacks: XScaleFactor, CacheXScaleFactor and other methods\n  // unconditionally dereference stack_[0] during network initialization.\n  // A Series needs at least two networks (see Series::Forward).\n  if (size == 0 || (type() == NT_SERIES && size == 1)) {\n    return false;\n  }\n  for (uint32_t i = 0; i < size; ++i) {\n    Network *network = CreateFromFile(fp);\n    if (network == nullptr) {\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/unicharset.h",
+            "  // SpecialUnicharCodes available. If false then there are normal unichars\n  // at these codes and they should not be used.\n  bool has_special_codes() const {\n    return get_fragment(UNICHAR_BROKEN) != nullptr &&\n           strcmp(id_to_unichar(UNICHAR_BROKEN),\n                  kSpecialUnicharCodes[UNICHAR_BROKEN]) == 0;\n  }\n",
+            "  // SpecialUnicharCodes available. If false then there are normal unichars\n  // at these codes and they should not be used.\n  bool has_special_codes() const {\n    return contains_unichar_id(UNICHAR_BROKEN) &&\n           get_fragment(UNICHAR_BROKEN) != nullptr &&\n           strcmp(id_to_unichar(UNICHAR_BROKEN),\n                  kSpecialUnicharCodes[UNICHAR_BROKEN]) == 0;\n  }\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/unichar.cpp",
+            "  unicodes.reserve(utf8_length);\n  const_iterator end_it(end(utf8_str, utf8_length));\n  for (const_iterator it(begin(utf8_str, utf8_length)); it != end_it; ++it) {\n    if (it.is_legal()) {\n      unicodes.push_back(*it);\n    } else {\n      unicodes.clear();\n      return unicodes;\n    }\n  }\n  return unicodes;\n}\n",
+            "  unicodes.reserve(utf8_length);\n  const_iterator end_it(end(utf8_str, utf8_length));\n  for (const_iterator it(begin(utf8_str, utf8_length)); it != end_it; ++it) {\n    // utf8_step() reports the width from the leading byte alone; reject a\n    // truncated trailing sequence rather than let the iterator run past the\n    // end of the string (issue #4495).\n    const int remaining = end_it.utf8_data() - it.utf8_data();\n    const int step = utf8_step(it.utf8_data());\n    if (step <= 0 || step > remaining) {\n      unicodes.clear();\n      return unicodes;\n    }\n    unicodes.push_back(*it);\n  }\n  return unicodes;\n}\n",
+        ),
+        (
+            "thirdparty/tesseract/src/lstm/weightmatrix.cpp",
+            "    if (!wi_.DeSerialize(fp)) {\n      return false;\n    }\n    uint32_t size;\n    if (!fp->DeSerialize(&size)) {\n      return false;\n",
+            "    if (!wi_.DeSerialize(fp)) {\n      return false;\n    }\n    // The second dimension is the number of inputs plus the bias column, so\n    // it must be at least 1. A zero dimension would make IntSimdMatrix::Init\n    // compute num_in = dim2 - 1 = -1 and read the bias from array_[-1] on an\n    // unallocated (null) array, so reject the corrupt model instead of\n    // crashing.\n    if (wi_.dim2() < 1) {\n      return false;\n    }\n    uint32_t size;\n    if (!fp->DeSerialize(&size)) {\n      return false;\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccstruct/matrix.h",
+            "    }\n  }\n\n  // Reallocates the array to the given size. Does not keep old data, but does\n  // not initialize the array either.\n  // The allocated memory is expanded on the end by pad, allowing deliberate\n  // access beyond the bounds of the array.\n  void ResizeNoInit(int size1, int size2, int pad = 0) {\n    int new_size = size1 * size2 + pad;\n    if (new_size > size_allocated_) {\n      delete[] array_;\n      array_ = new T[new_size];\n",
+            "    }\n  }\n\n  // DoS protection: the maximum number of elements (including the\n  // padding) a single array may hold. Legitimate matrices in tesseract\n  // are far smaller than this; the cap is consistent with the\n  // \"unreasonably large\" bound applied to the scale vector in\n  // WeightMatrix::DeSerialize.\n  static const int64_t kMaxElements = 100000000;\n\n  // Reallocates the array to the given size. Does not keep old data, but does\n  // not initialize the array either.\n  // The allocated memory is expanded on the end by pad, allowing deliberate\n  // access beyond the bounds of the array.\n  void ResizeNoInit(int size1, int size2, int pad = 0) {\n    // Compute the total element count in 64 bits so it cannot overflow\n    // (in particular (-1) * (-1) must not pass as 1), then reject\n    // corrupted values (a crafted .traineddata file could produce\n    // negative or oversized dimensions) and bound the allocation against\n    // denial of service.\n    const int64_t total = static_cast<int64_t>(size1) * size2 + pad;\n    if (size1 < 0 || size2 < 0 || pad < 0 || total > kMaxElements) {\n      return;\n    }\n    const int new_size = static_cast<int>(total);\n    if (new_size > size_allocated_) {\n      delete[] array_;\n      array_ = new T[new_size];\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccstruct/matrix.h",
+            "    dim1_ = size1;\n    dim2_ = size2;\n    // Fill the padding data so it isn't uninitialized.\n    for (int i = size1 * size2; i < new_size; ++i) {\n      array_[i] = empty_;\n    }\n  }\n",
+            "    dim1_ = size1;\n    dim2_ = size2;\n    // Fill the padding data so it isn't uninitialized.\n    for (int i = new_size - pad; i < new_size; ++i) {\n      array_[i] = empty_;\n    }\n  }\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccstruct/matrix.h",
+            "    return true;\n  }\n  bool DeSerializeSize(TFile *fp) {\n    int32_t size1, size2;\n    if (!fp->DeSerialize(&size1)) {\n      return false;\n    }\n",
+            "    return true;\n  }\n  bool DeSerializeSize(TFile *fp) {\n    // Read the dimensions as uint32_t, like the FILE * variant above.\n    // The previous int32_t read compared the signed value against the\n    // signed upper bound, so a negative dimension (e.g. 0xFFFFFFFF = -1)\n    // passed the check, later causing signed integer overflow in\n    // ResizeNoInit (size1 * size2) and out-of-bounds accesses in\n    // IntSimdMatrix. Read as unsigned, the same bytes are 0xFFFFFFFF\n    // and fail the bound check below.\n    uint32_t size1, size2;\n    if (!fp->DeSerialize(&size1)) {\n      return false;\n    }\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccstruct/matrix.h",
+            "    if (!fp->DeSerialize(&size2)) {\n      return false;\n    }\n    // Arbitrarily limit the number of elements to protect against bad data.\n    if (size1 > UINT16_MAX) {\n      return false;\n    }\n    if (size2 > UINT16_MAX) {\n      return false;\n    }\n    Resize(size1, size2, empty_);\n    return true;\n  }\n",
+            "    if (!fp->DeSerialize(&size2)) {\n      return false;\n    }\n    // Arbitrarily limit the number of elements to protect against bad data.\n    if (size1 > UINT16_MAX) {\n      return false;\n    }\n    if (size2 > UINT16_MAX) {\n      return false;\n    }\n    // The caller allocates before reading the elements, so the declared\n    // size must be backed by the bytes that actually remain in the stream\n    // (empty_ plus the element data). Without this check a crafted file\n    // could declare gigabytes of data while carrying a few hundred bytes,\n    // forcing a huge allocation (denial of service) from a tiny input.\n    const uint64_t required = (static_cast<uint64_t>(size1) * size2 + 1) *\n                              static_cast<uint64_t>(sizeof(T));\n    if (required > fp->RemainingBytes()) {\n      return false;\n    }\n    Resize(size1, size2, empty_);\n    return true;\n  }\n",
+        ),
+        (
+            "thirdparty/tesseract/src/lstm/lstmrecognizer.cpp",
+            "  if (!fp->DeSerialize(&null_char_)) {\n    return false;\n  }\n  if (!fp->DeSerialize(&adam_beta_)) {\n    return false;\n  }\n",
+            "  if (!fp->DeSerialize(&null_char_)) {\n    return false;\n  }\n  // null_char_ is used as an index into the network softmax output\n  // (top_n_flags_/outputs), so it must lie within the output range. A\n  // corrupt or malicious model may store a negative or oversized value,\n  // which would index out of bounds during recognition, so reject it here.\n  if (null_char_ < 0 || null_char_ >= network_->NumOutputs()) {\n    tprintf(\"Error: null_char %d out of range for network with %d outputs\\n\",\n            null_char_, network_->NumOutputs());\n    return false;\n  }\n  if (!fp->DeSerialize(&adam_beta_)) {\n    return false;\n  }\n",
+        ),
+        (
+            "thirdparty/tesseract/src/lstm/weightmatrix.cpp",
+            "    if (size > 100000000) {\n      return false;\n    }\n#ifdef FAST_FLOAT\n    scales_.reserve(size);\n    for (auto n = size; n > 0; n--) {\n",
+            "    if (size > 100000000) {\n      return false;\n    }\n    // A valid model carries one scale per output row: the generic\n    // (non-SIMD) MatrixDotVector reads scales_[i] for i < wi_.dim1(), and the\n    // SIMD path resizes to a rounded size no smaller than that. So the\n    // serialized scale vector must have at least wi_.dim1() entries. Check\n    // this here, before resizing below, where a zero size would otherwise\n    // make the &scales_[0] read index an empty vector (undefined behaviour).\n    if (static_cast<size_t>(size) < static_cast<size_t>(wi_.dim1())) {\n      return false;\n    }\n#ifdef FAST_FLOAT\n    scales_.reserve(size);\n    for (auto n = size; n > 0; n--) {\n",
+        ),
+        (
+            "thirdparty/tesseract/src/lstm/weightmatrix.cpp",
+            "    }\n#else\n    scales_.resize(size);\n    if (!fp->DeSerialize(&scales_[0], size)) {\n      return false;\n    }\n    for (auto &scale : scales_) {\n",
+            "    }\n#else\n    scales_.resize(size);\n    if (size > 0 && !fp->DeSerialize(&scales_[0], size)) {\n      return false;\n    }\n    for (auto &scale : scales_) {\n",
+        ),
+        (
+            "thirdparty/tesseract/src/lstm/weightmatrix.cpp",
+            "    if (!fp->DeSerialize(old_scales)) {\n      return false;\n    }\n    scales_.reserve(old_scales.size());\n    for (float old_scale : old_scales) {\n      scales_.push_back(old_scale);\n",
+            "    if (!fp->DeSerialize(old_scales)) {\n      return false;\n    }\n    // The generic (non-SIMD) IntSimdMatrix::MatrixDotVector reads\n    // scales_[i] for i < wi_.dim1(), so the old format carries at least\n    // one scale per output row as well.\n    if (old_scales.size() < static_cast<size_t>(wi_.dim1())) {\n      return false;\n    }\n    scales_.reserve(old_scales.size());\n    for (float old_scale : old_scales) {\n      scales_.push_back(old_scale);\n",
+        ),
+        (
+            "thirdparty/tesseract/src/lstm/weightmatrix.cpp",
+            "    if (size > 100000000) {\n      return false;\n    }\n    // A valid model carries one scale per output row: the generic\n    // (non-SIMD) MatrixDotVector reads scales_[i] for i < wi_.dim1(), and the\n    // SIMD path resizes to a rounded size no smaller than that. So the\n",
+            "    if (size > 100000000) {\n      return false;\n    }\n    // The scales are stored as doubles, so the file must contain that many\n    // bytes. Checking this before the allocation below stops a tiny crafted\n    // file from forcing a huge allocation.\n    if (static_cast<uint64_t>(size) * sizeof(double) > fp->RemainingBytes()) {\n      return false;\n    }\n    // A valid model carries one scale per output row: the generic\n    // (non-SIMD) MatrixDotVector reads scales_[i] for i < wi_.dim1(), and the\n    // SIMD path resizes to a rounded size no smaller than that. So the\n",
+        ),
+        (
+            "thirdparty/tesseract/src/lstm/weightmatrix.cpp",
+            "    if (!wi_.DeSerialize(fp)) {\n      return false;\n    }\n    std::vector<float> old_scales;\n    if (!fp->DeSerialize(old_scales)) {\n      return false;\n    }\n    // The generic (non-SIMD) IntSimdMatrix::MatrixDotVector reads\n",
+            "    if (!wi_.DeSerialize(fp)) {\n      return false;\n    }\n    uint32_t num_scales;\n    if (!fp->DeSerialize(&num_scales)) {\n      return false;\n    }\n    // Reject unreasonably large scale vectors.\n    if (num_scales > 100000000) {\n      return false;\n    }\n    // The scales are stored as floats, so the file must contain that many\n    // bytes. Checking this before the allocation below stops a tiny crafted\n    // file from forcing a huge allocation.\n    if (static_cast<uint64_t>(num_scales) * sizeof(float) > fp->RemainingBytes()) {\n      return false;\n    }\n    std::vector<float> old_scales(num_scales);\n    if (num_scales > 0 && !fp->DeSerialize(&old_scales[0], num_scales)) {\n      return false;\n    }\n    // The generic (non-SIMD) IntSimdMatrix::MatrixDotVector reads\n",
+        ),
+        (
+            "thirdparty/tesseract/src/lstm/weightmatrix.cpp",
+            "    if (!wi_.DeSerialize(fp)) {\n      return false;\n    }\n    // The second dimension is the number of inputs plus the bias column, so\n    // it must be at least 1. A zero dimension would make IntSimdMatrix::Init\n    // compute num_in = dim2 - 1 = -1 and read the bias from array_[-1] on an\n",
+            "    if (!wi_.DeSerialize(fp)) {\n      return false;\n    }\n    // The first dimension is the number of output rows, so it must be at\n    // least 1. A zero dimension would leave the reshaped weight matrix and\n    // the scale vector empty, so reject the corrupt model.\n    if (wi_.dim1() < 1) {\n      return false;\n    }\n    // The second dimension is the number of inputs plus the bias column, so\n    // it must be at least 1. A zero dimension would make IntSimdMatrix::Init\n    // compute num_in = dim2 - 1 = -1 and read the bias from array_[-1] on an\n",
+        ),
+        (
+            "thirdparty/tesseract/src/lstm/lstmrecognizer.cpp",
+            "  if (!DeSerialize(mgr, &fp)) {\n    return false;\n  }\n  if (lang.empty()) {\n    return true;\n  }\n",
+            "  if (!DeSerialize(mgr, &fp)) {\n    return false;\n  }\n  // Recoded codes are used as indices into the network softmax output\n  // (top_n_flags_/outputs), sized to the network output count. The recoder is\n  // loaded independently of the network, so tie it to that count: a corrupt\n  // model with a code range wider than the softmax would index out of bounds\n  // during beam search. This covers both the recoding and the pass-through\n  // recoder.\n  //\n  // The check belongs in Load, not in the recoder-loading routines: the\n  // recognition path (LSTMRecognizer::Load) always has the final network and\n  // recoder, whereas the training path (LSTMTrainer::TryLoadingCheckpoint)\n  // deserializes an old network together with a target-traineddata recoder\n  // that may legitimately have a wider code range; that path reconciles the\n  // two with RemapOutputs, which must be allowed to run.\n  //\n  // It applies only when the network actually has a softmax to index into;\n  // a zero-output network has no softmax array, so the recoder's code range\n  // cannot point out of bounds and the check is skipped.\n  if (network_->NumOutputs() > 0 && recoder_.code_range() > network_->NumOutputs()) {\n    tprintf(\"Error: recoder code range %d exceeds network output count %d\\n\",\n            recoder_.code_range(), network_->NumOutputs());\n    return false;\n  }\n  if (lang.empty()) {\n    return true;\n  }\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccutil/unicharset.cpp",
+            "  }\n  if (script_table_size_reserved == 0) {\n    script_table_size_reserved = 8;\n    script_table = new char *[script_table_size_reserved];\n  } else if (script_table_size_used >= script_table_size_reserved) {\n    assert(script_table_size_used == script_table_size_reserved);\n    script_table_size_reserved += script_table_size_reserved;\n    char **new_script_table = new char *[script_table_size_reserved];\n    memcpy(new_script_table, script_table,\n           script_table_size_used * sizeof(char *));\n    delete[] script_table;\n    script_table = new_script_table;\n  }\n  script_table[script_table_size_used] = new char[strlen(script) + 1];\n  strcpy(script_table[script_table_size_used], script);\n",
+            "  }\n  if (script_table_size_reserved == 0) {\n    script_table_size_reserved = 8;\n    script_table = new char *[script_table_size_reserved]();\n  } else if (script_table_size_used >= script_table_size_reserved) {\n    assert(script_table_size_used == script_table_size_reserved);\n    script_table_size_reserved += script_table_size_reserved;\n    char **old_script_table = script_table;\n    script_table = new char *[script_table_size_reserved]();\n    memcpy(script_table, old_script_table,\n           script_table_size_used * sizeof(char *));\n    delete[] old_script_table;\n  }\n  script_table[script_table_size_used] = new char[strlen(script) + 1];\n  strcpy(script_table[script_table_size_used], script);\n",
+        ),
     ];
+
+    // Some upstream Tesseract fixes only change code that MuPDF does not build:
+    // the legacy engine (DISABLED_LEGACY_ENGINE; src/classify/intproto.cpp,
+    // normmatch.cpp and adaptmatch.cpp are not in the source lists) and the
+    // FAST_FLOAT branches. They are left out of tesseract_patches. Fail if MuPDF
+    // starts building that code, so that they are looked at again.
+    let makelists = build_dir.join("Makelists");
+    let vcxproj = build_dir.join("platform/win32/libtesseract.vcxproj");
+    let mut legacy_off = true;
+    for path in [&makelists, &vcxproj] {
+        let text = fs::read_to_string(path)
+            .map_err(|e| format!("Unable to read {}: {e}", path.display()))?;
+        if ["FAST_FLOAT", "intproto.cpp", "normmatch.cpp", "adaptmatch.cpp"]
+            .iter()
+            .any(|name| text.contains(name))
+        {
+            legacy_off = false;
+        }
+        if path == &makelists {
+            legacy_off &= text.contains("TESSERACT_DEFINES += -DDISABLED_LEGACY_ENGINE");
+        } else {
+            let defines: Vec<&str> = text
+                .lines()
+                .filter(|line| line.contains("<PreprocessorDefinitions>"))
+                .collect();
+            legacy_off &= !defines.is_empty()
+                && defines.iter().all(|line| line.contains("DISABLED_LEGACY_ENGINE"));
+        }
+    }
+    if !legacy_off {
+        Err("Unable to patch Tesseract: MuPDF now builds its legacy engine or FAST_FLOAT code; check the upstream fixes left out of tesseract_patches".to_string())?;
+    }
 
     for &(rel_path, old, new) in tesseract_patches {
         let path = build_dir.join(rel_path);
