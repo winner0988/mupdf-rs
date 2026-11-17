@@ -688,6 +688,134 @@ fn patch_mupdf_sources(build_dir: &Path) -> Result<()> {
             "  }\n  if (script_table_size_reserved == 0) {\n    script_table_size_reserved = 8;\n    script_table = new char *[script_table_size_reserved];\n  } else if (script_table_size_used >= script_table_size_reserved) {\n    assert(script_table_size_used == script_table_size_reserved);\n    script_table_size_reserved += script_table_size_reserved;\n    char **new_script_table = new char *[script_table_size_reserved];\n    memcpy(new_script_table, script_table,\n           script_table_size_used * sizeof(char *));\n    delete[] script_table;\n    script_table = new_script_table;\n  }\n  script_table[script_table_size_used] = new char[strlen(script) + 1];\n  strcpy(script_table[script_table_size_used], script);\n",
             "  }\n  if (script_table_size_reserved == 0) {\n    script_table_size_reserved = 8;\n    script_table = new char *[script_table_size_reserved]();\n  } else if (script_table_size_used >= script_table_size_reserved) {\n    assert(script_table_size_used == script_table_size_reserved);\n    script_table_size_reserved += script_table_size_reserved;\n    char **old_script_table = script_table;\n    script_table = new char *[script_table_size_reserved]();\n    memcpy(script_table, old_script_table,\n           script_table_size_used * sizeof(char *));\n    delete[] old_script_table;\n  }\n  script_table[script_table_size_used] = new char[strlen(script) + 1];\n  strcpy(script_table[script_table_size_used], script);\n",
         ),
+
+        // Upstream Tesseract fixes from 5.5.3 and 5.5.4 in code that recognition
+        // runs (#580): LSTM beam search, layout analysis and the result iterator.
+        // Applied in order:
+        // - f4afb2cc9545f622a07812b09e1b72fc78f85a64
+        // - 6ce521c74844af44c7c8d8bcb5733d8a81adc10f
+        // - ef4b5095e9c8ce95b08b8b4d8452e845505dcaa3
+        // - 810854166ed6382fcf0efe1a2e87b9333e41b930
+        // - e13b2d79456de1091e57766a0298427fa3102187
+        // - b77e37b5fcbb223cdbae4a46598b9f0b672adfb5
+        // - 9983e9c69ac49e0ee2a6d05204879ae5ec3481b6
+        // - 2cd9955ef1c6d2aa9974dfdbb5ff5c4e44603b26
+        // - 5ca34b6b386ae09c8a6571b750fdac116cccbe40
+        // - fb87a84b6e3384b424b2169c76de9031046861e9
+        // These are verbatim upstream changes.
+        // Other upstream changes from 5.5.3 and 5.5.4 are left out: they touch code
+        // that MuPDF does not build (legacy engine, chopper, OSD, ScrollView) or
+        // features this project does not use; see winner0988/Pdf-reader#580.
+        (
+            "thirdparty/tesseract/src/lstm/recodebeam.h",
+            "    ASSERT_HOST(src.dawgs == nullptr);\n  }\n  RecodeNode &operator=(const RecodeNode &src) {\n    delete dawgs;\n    memcpy(this, &src, sizeof(src));\n    ((RecodeNode &)src).dawgs = nullptr;\n    return *this;\n  }\n  ~RecodeNode() {\n",
+            "    ASSERT_HOST(src.dawgs == nullptr);\n  }\n  RecodeNode &operator=(const RecodeNode &src) {\n    if (this != &src) {\n      delete dawgs;\n      code = src.code;\n      unichar_id = src.unichar_id;\n      permuter = src.permuter;\n      start_of_dawg = src.start_of_dawg;\n      start_of_word = src.start_of_word;\n      end_of_word = src.end_of_word;\n      duplicate = src.duplicate;\n      certainty = src.certainty;\n      score = src.score;\n      prev = src.prev;\n      dawgs = src.dawgs;\n      code_hash = src.code_hash;\n      const_cast<RecodeNode &>(src).dawgs = nullptr;\n    }\n    return *this;\n  }\n  ~RecodeNode() {\n",
+        ),
+        (
+            "thirdparty/tesseract/src/lstm/recodebeam.cpp",
+            "  for (int p = length - 1; p >= 0 && previous != nullptr; --p) {\n    while (previous->duplicate || previous->code == null_char_) {\n      previous = previous->prev;\n    }\n    prefix.Set(p, previous->code);\n    full_code.Set(p, previous->code);\n",
+            "  for (int p = length - 1; p >= 0 && previous != nullptr; --p) {\n    while (previous->duplicate || previous->code == null_char_) {\n      previous = previous->prev;\n      if (previous == nullptr) {\n        break;\n      }\n    }\n    if (previous == nullptr) {\n      // The beam entry has fewer than length codes in its history, so the\n      // prefix cannot be reconstructed reliably. Drop this continuation\n      // rather than using partially initialized prefix/full_code entries.\n      return;\n    }\n    prefix.Set(p, previous->code);\n    full_code.Set(p, previous->code);\n",
+        ),
+        (
+            "thirdparty/tesseract/src/lstm/recodebeam.cpp",
+            "    dawg_args.active_dawgs = uni_prev->dawgs;\n    word_start = uni_prev->start_of_dawg;\n  } else {\n    return; // Can't continue if not a dict word.\n  }\n  auto permuter = static_cast<PermuterType>(dict_->def_letter_is_okay(\n",
+            "    dawg_args.active_dawgs = uni_prev->dawgs;\n    word_start = uni_prev->start_of_dawg;\n  } else {\n    delete updated_dawgs;\n    return; // Can't continue if not a dict word.\n  }\n  auto permuter = static_cast<PermuterType>(dict_->def_letter_is_okay(\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccmain/paragraphs.cpp",
+            "      continue;\n    }\n    // rows[start, end) should be a paragraph.\n    PARA *p = new PARA();\n    if (model == kCrownLeft || model == kCrownRight) {\n      p->is_very_first_or_continuation = true;\n      // Crown paragraph.\n",
+            "      continue;\n    }\n    // rows[start, end) should be a paragraph.\n    std::unique_ptr<PARA> p(new PARA());\n    if (model == kCrownLeft || model == kCrownRight) {\n      p->is_very_first_or_continuation = true;\n      // Crown paragraph.\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccmain/paragraphs.cpp",
+            "    p->is_list_item = model->justification() == JUSTIFICATION_RIGHT\n                          ? rows[start].ri_->rword_indicates_list_item\n                          : rows[start].ri_->lword_indicates_list_item;\n    for (int row = start; row < end; row++) {\n      if ((*row_owners)[row] != nullptr) {\n        tprintf(\n",
+            "    p->is_list_item = model->justification() == JUSTIFICATION_RIGHT\n                          ? rows[start].ri_->rword_indicates_list_item\n                          : rows[start].ri_->lword_indicates_list_item;\n    PARA *para = p.release();\n    for (int row = start; row < end; row++) {\n      if ((*row_owners)[row] != nullptr) {\n        tprintf(\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccmain/paragraphs.cpp",
+            "            \"more than once!\\n\");\n        delete (*row_owners)[row];\n      }\n      (*row_owners)[row] = p;\n    }\n  }\n}\n",
+            "            \"more than once!\\n\");\n        delete (*row_owners)[row];\n      }\n      (*row_owners)[row] = para;\n    }\n  }\n}\n",
+        ),
+        (
+            "thirdparty/tesseract/src/textord/cjkpitch.cpp",
+            "#include \"topitch.h\"\n#include \"tovars.h\"\n\n#include <algorithm> // for std::sort\n#include <cmath>\n#include <vector>    // for std::vector\n\nnamespace tesseract {\n",
+            "#include \"topitch.h\"\n#include \"tovars.h\"\n\n#include <algorithm> // for std::clamp, std::sort\n#include <cmath>\n#include <limits>    // for std::numeric_limits\n#include <vector>    // for std::vector\n\nnamespace tesseract {\n",
+        ),
+        (
+            "thirdparty/tesseract/src/textord/cjkpitch.cpp",
+            "// to be fixed-pitch.\nstatic const float kFixedPitchThreshold = 0.35f;\n\n// rank statistics for a small collection of float values.\nclass SimpleStats {\npublic:\n",
+            "// to be fixed-pitch.\nstatic const float kFixedPitchThreshold = 0.35f;\n\n// Convert a float coordinate to TDimension, clamping out-of-range values\n// so that the conversion is well-defined even for corrupt or unusual input.\nstatic TDimension ToTDimension(float value) {\n  return static_cast<TDimension>(\n      std::clamp(static_cast<double>(value),\n                 static_cast<double>(std::numeric_limits<TDimension>::lowest()),\n                 static_cast<double>(std::numeric_limits<TDimension>::max())));\n}\n\n// rank statistics for a small collection of float values.\nclass SimpleStats {\npublic:\n",
+        ),
+        (
+            "thirdparty/tesseract/src/textord/cjkpitch.cpp",
+            "        skipped_whitespaces = true;\n        c1 -= estimated_pitch_;\n      }\n      TBOX ibody(c1, box(i).bottom(), c1 + estimated_pitch_, box(i).top());\n\n      // Collect all characters that mostly fit in the region.\n      // Also, their union height shouldn't be too big.\n",
+            "        skipped_whitespaces = true;\n        c1 -= estimated_pitch_;\n      }\n      TBOX ibody(ToTDimension(c1), box(i).bottom(),\n                 ToTDimension(c1 + estimated_pitch_), box(i).top());\n\n      // Collect all characters that mostly fit in the region.\n      // Also, their union height shouldn't be too big.\n",
+        ),
+        (
+            "thirdparty/tesseract/src/textord/cjkpitch.cpp",
+            "        skipped_whitespaces = true;\n        c1 += estimated_pitch_;\n      }\n      TBOX ibody(c1 - estimated_pitch_, box(i).bottom(), c1, box(i).top());\n\n      size_t j = i;\n      TBOX merged;\n",
+            "        skipped_whitespaces = true;\n        c1 += estimated_pitch_;\n      }\n      TBOX ibody(ToTDimension(c1 - estimated_pitch_), box(i).bottom(),\n                 ToTDimension(c1), box(i).top());\n\n      size_t j = i;\n      TBOX merged;\n",
+        ),
+        (
+            "thirdparty/tesseract/src/textord/colpartitiongrid.cpp",
+            "        BLOBNBOX *blob = blob_it.data();\n        if (blob->cblob()->area() == 0) {\n          // Any blob with zero area is a fake image blob and should be deleted.\n          delete blob->cblob();\n          delete blob;\n        }\n      }\n",
+            "        BLOBNBOX *blob = blob_it.data();\n        if (blob->cblob()->area() == 0) {\n          // Any blob with zero area is a fake image blob and should be deleted.\n          // Remove it from the list first to avoid a double delete.\n          delete blob->remove_cblob();\n          blob_it.extract();\n          delete blob;\n        }\n      }\n",
+        ),
+        (
+            "thirdparty/tesseract/src/textord/tospace.cpp",
+            "  int16_t current_within_xht_gap = INT16_MAX;\n  int16_t next_within_xht_gap = INT16_MAX;\n  int16_t word_count = 0;\n\n  // repeated char words\n  WERD_IT rep_char_it(&(row->rep_words));\n",
+            "  int16_t current_within_xht_gap = INT16_MAX;\n  int16_t next_within_xht_gap = INT16_MAX;\n  int16_t word_count = 0;\n  // Degenerate rows may have space_size 0, so guard against division by zero.\n  // A fallback larger than any int16_t gap yields floor(gap / space_size) == 0,\n  // so the blank count is raised to 1 by the checks below.\n  const float space_size = row->space_size > 0.0f\n                               ? row->space_size\n                               : static_cast<float>(INT16_MAX) + 1.0f;\n\n  // repeated char words\n  WERD_IT rep_char_it(&(row->rep_words));\n",
+        ),
+        (
+            "thirdparty/tesseract/src/textord/tospace.cpp",
+            "      current_gap = box_it.data()->bounding_box().left() - next_rep_char_word_right;\n      current_within_xht_gap = current_gap;\n      if (current_gap > tosp_rep_space * repetition_spacing) {\n        prev_blanks = static_cast<uint8_t>(std::floor(current_gap / row->space_size));\n        if (prev_blanks < 1) {\n          prev_blanks = 1;\n        }\n",
+            "      current_gap = box_it.data()->bounding_box().left() - next_rep_char_word_right;\n      current_within_xht_gap = current_gap;\n      if (current_gap > tosp_rep_space * repetition_spacing) {\n        prev_blanks = static_cast<uint8_t>(std::floor(current_gap / space_size));\n        if (prev_blanks < 1) {\n          prev_blanks = 1;\n        }\n",
+        ),
+        (
+            "thirdparty/tesseract/src/textord/tospace.cpp",
+            "            current_gap = word->bounding_box().left() - prev_x;\n            current_within_xht_gap = current_gap;\n            if (current_gap > tosp_rep_space * repetition_spacing) {\n              blanks = static_cast<uint8_t>(std::floor(current_gap / row->space_size));\n              if (blanks < 1) {\n                blanks = 1;\n              }\n",
+            "            current_gap = word->bounding_box().left() - prev_x;\n            current_within_xht_gap = current_gap;\n            if (current_gap > tosp_rep_space * repetition_spacing) {\n              blanks = static_cast<uint8_t>(std::floor(current_gap / space_size));\n              if (blanks < 1) {\n                blanks = 1;\n              }\n",
+        ),
+        (
+            "thirdparty/tesseract/src/textord/tospace.cpp",
+            "             */\n            current_gap = blob_box.left() - next_rep_char_word_right;\n            if (current_gap > tosp_rep_space * repetition_spacing) {\n              blanks = static_cast<uint8_t>(current_gap / row->space_size);\n              if (blanks < 1) {\n                blanks = 1;\n              }\n",
+            "             */\n            current_gap = blob_box.left() - next_rep_char_word_right;\n            if (current_gap > tosp_rep_space * repetition_spacing) {\n              blanks = static_cast<uint8_t>(current_gap / space_size);\n              if (blanks < 1) {\n                blanks = 1;\n              }\n",
+        ),
+        (
+            "thirdparty/tesseract/src/textord/tospace.cpp",
+            "      repetition_spacing = find_mean_blob_spacing(word);\n      current_gap = word->bounding_box().left() - prev_x;\n      if (current_gap > tosp_rep_space * repetition_spacing) {\n        blanks = static_cast<uint8_t>(std::floor(current_gap / row->space_size));\n        if (blanks < 1) {\n          blanks = 1;\n        }\n",
+            "      repetition_spacing = find_mean_blob_spacing(word);\n      current_gap = word->bounding_box().left() - prev_x;\n      if (current_gap > tosp_rep_space * repetition_spacing) {\n        blanks = static_cast<uint8_t>(std::floor(current_gap / space_size));\n        if (blanks < 1) {\n          blanks = 1;\n        }\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccmain/pageiterator.cpp",
+            "  if (it_->block() == nullptr) {\n    return; // At end of the document.\n  }\n  PAGE_RES_IT para(page_res_);\n  PAGE_RES_IT next_para(para);\n  next_para.forward_paragraph();\n  while (next_para.cmp(*it_) <= 0) {\n    para = next_para;\n    next_para.forward_paragraph();\n  }\n  *it_ = para;\n  BeginWord(0);\n}\n\nbool PageIterator::IsWithinFirstTextlineOfParagraph() const {\n",
+            "  if (it_->block() == nullptr) {\n    return; // At end of the document.\n  }\n  const BLOCK_RES *target_block = it_->block();\n  const PARA *target_para = it_->row() == nullptr ? nullptr : it_->row()->row->para();\n  PAGE_RES_IT para(page_res_);\n  // Paragraph and block identities are stable within PAGE_RES. Avoid cmp(),\n  // which searches the page and makes this forward scan quadratic.\n  while (para.block() != nullptr &&\n         (para.block() != target_block ||\n          (para.row() != nullptr && para.row()->row->para() != target_para))) {\n    para.forward_paragraph();\n  }\n  if (para.block() != nullptr) {\n    *it_ = para;\n    BeginWord(0);\n  }\n}\n\nbool PageIterator::IsWithinFirstTextlineOfParagraph() const {\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccmain/paragraphs.cpp",
+            "    p->is_list_item = model->justification() == JUSTIFICATION_RIGHT\n                          ? rows[start].ri_->rword_indicates_list_item\n                          : rows[start].ri_->lword_indicates_list_item;\n    PARA *para = p.release();\n    for (int row = start; row < end; row++) {\n      if ((*row_owners)[row] != nullptr) {\n        tprintf(\n            \"Memory leak! ConvertHypothesizeModelRunsToParagraphs() called \"\n            \"more than once!\\n\");\n        delete (*row_owners)[row];\n      }\n      (*row_owners)[row] = para;\n    }\n  }\n}\n",
+            "    p->is_list_item = model->justification() == JUSTIFICATION_RIGHT\n                          ? rows[start].ri_->rword_indicates_list_item\n                          : rows[start].ri_->lword_indicates_list_item;\n    // Free any stale owners of the rows of the run, then give all rows of\n    // the run a reference to the new paragraph, whose ownership is\n    // transferred directly to the first row of the run.\n    for (int row = start; row < end; row++) {\n      if ((*row_owners)[row] != nullptr) {\n        tprintf(\n            \"Memory leak! ConvertHypothesizedModelRunsToParagraphs() called \"\n            \"more than once!\\n\");\n        delete (*row_owners)[row];\n      }\n    }\n    (*row_owners)[start] = p.release();\n    for (int row = start + 1; row < end; row++) {\n      (*row_owners)[row] = (*row_owners)[start];\n    }\n  }\n}\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccmain/resultiterator.cpp",
+            "    return true; // doesn't matter.\n  }\n  LTRResultIterator it(*this);\n  it.RestartParagraph();\n  // Try to figure out the ltr-ness of the paragraph.  The rules below\n  // make more sense in the context of a difficult paragraph example.\n  // Here we denote {ltr characters, RTL CHARACTERS}:\n",
+            "    return true; // doesn't matter.\n  }\n  LTRResultIterator it(*this);\n  if (!it.PageIterator::IsAtBeginningOf(RIL_PARA)) {\n    it.RestartParagraph();\n  }\n  // Try to figure out the ltr-ness of the paragraph.  The rules below\n  // make more sense in the context of a difficult paragraph example.\n  // Here we denote {ltr characters, RTL CHARACTERS}:\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccmain/resultiterator.cpp",
+            "\n  // A LTRResultIterator goes strictly left-to-right word order.\n  LTRResultIterator ltr_it(resit);\n  ltr_it.RestartRow();\n  if (ltr_it.Empty(RIL_WORD)) {\n    return;\n  }\n",
+            "\n  // A LTRResultIterator goes strictly left-to-right word order.\n  LTRResultIterator ltr_it(resit);\n  if (!ltr_it.PageIterator::IsAtBeginningOf(RIL_TEXTLINE)) {\n    ltr_it.RestartRow();\n  }\n  if (ltr_it.Empty(RIL_WORD)) {\n    return;\n  }\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccmain/resultiterator.cpp",
+            "\nvoid ResultIterator::MoveToLogicalStartOfTextline() {\n  std::vector<int> word_indices;\n  RestartRow();\n  CalculateTextlineOrder(current_paragraph_is_ltr_, dynamic_cast<const LTRResultIterator &>(*this),\n                         &word_indices);\n  unsigned i = 0;\n",
+            "\nvoid ResultIterator::MoveToLogicalStartOfTextline() {\n  std::vector<int> word_indices;\n  if (!PageIterator::IsAtBeginningOf(RIL_TEXTLINE)) {\n    RestartRow();\n  }\n  CalculateTextlineOrder(current_paragraph_is_ltr_, dynamic_cast<const LTRResultIterator &>(*this),\n                         &word_indices);\n  unsigned i = 0;\n",
+        ),
+        (
+            "thirdparty/tesseract/src/ccmain/resultiterator.cpp",
+            "      if (!PageIterator::Next(level)) {\n        return false;\n      }\n      if (IsWithinFirstTextlineOfParagraph()) {\n        // if we've advanced to a new paragraph,\n        // recalculate current_paragraph_is_ltr_\n        current_paragraph_is_ltr_ = CurrentParagraphIsLtr();\n",
+            "      if (!PageIterator::Next(level)) {\n        return false;\n      }\n      if (PageIterator::IsAtBeginningOf(RIL_PARA)) {\n        // if we've advanced to a new paragraph,\n        // recalculate current_paragraph_is_ltr_\n        current_paragraph_is_ltr_ = CurrentParagraphIsLtr();\n",
+        ),
     ];
 
     // Some upstream Tesseract fixes only change code that MuPDF does not build:
