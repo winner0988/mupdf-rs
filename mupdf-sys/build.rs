@@ -996,7 +996,36 @@ fn patch_mupdf_sources(build_dir: &Path) -> Result<()> {
         Err("Unable to patch Tesseract: MuPDF now builds its legacy engine or FAST_FLOAT code; check the upstream fixes left out of tesseract_patches".to_string())?;
     }
 
-    for &(rel_path, old, new) in tesseract_patches.iter().chain(freetype_patches) {
+    // MuPDF 1.28 text extraction fixes, not fixed upstream (1.28.x branch or master) as of
+    // 2026-11-20:
+    // - pdf-op-run.c: a glyph drawn with text render mode 4, 5 or 6 also goes into the
+    //   clip that ET applies, and the structured text device took that copy as text a
+    //   second time. The clip copy of a drawn glyph gets no Unicode value (-1, as for the
+    //   extra glyphs of one character), which the text device skips; glyphs that are only
+    //   clipped (mode 7) keep theirs.
+    // - pdf-type3.c: 1.28 reads a g name that is not a standard glyph name (g0024, g41) as a
+    //   hexadecimal TrueType glyph index, a guess for old Ghostscript TrueType subsets. Type 3
+    //   fonts that name their glyphs after the character code (g32, g33, ...) then got wrong
+    //   letters instead of the "character code as ASCII" fallback. Type 3 fonts skip that
+    //   guess again, as in 1.27; other fonts keep it.
+    let text_patches: &[(&str, &str, &str)] = &[
+        (
+            "source/pdf/pdf-op-run.c",
+            "\t\tpdf_tos_accumulate_clip(ctx, &pr->tos);\n\t\tfz_show_glyph_aux(ctx, pr->tos.clip_text, fontdesc->font, trm, adv, gid, ucsbuf[0], cid, fontdesc->wmode, pr->bidi, FZ_BIDI_NEUTRAL, lang);\n",
+            "\t\tpdf_tos_accumulate_clip(ctx, &pr->tos);\n\t\tfz_show_glyph_aux(ctx, pr->tos.clip_text, fontdesc->font, trm, adv, gid, pr->tos.text_mode == 7 ? ucsbuf[0] : -1, cid, fontdesc->wmode, pr->bidi, FZ_BIDI_NEUTRAL, lang);\n",
+        ),
+        (
+            "source/pdf/pdf-type3.c",
+            "\t\t\tfor (i = 32; i < 127; ++i)\n\t\t\t\tif (fontdesc->cid_to_ucs[i] == FZ_REPLACEMENT_CHARACTER)\n\t\t\t\t\tfontdesc->cid_to_ucs[i] = i;\n",
+            "\t\t\tfor (i = 0; i < 256; ++i)\n\t\t\t{\n\t\t\t\tif (estrings[i] && estrings[i][0] == 'g')\n\t\t\t\t{\n\t\t\t\t\tchar gname[64];\n\t\t\t\t\tchar *end;\n\t\t\t\t\tfz_strlcpy(gname, estrings[i], sizeof gname);\n\t\t\t\t\tend = strchr(gname, '.');\n\t\t\t\t\tif (end)\n\t\t\t\t\t\t*end = 0;\n\t\t\t\t\tend = strchr(gname, '_');\n\t\t\t\t\tif (end)\n\t\t\t\t\t\t*end = 0;\n\t\t\t\t\tif (!fz_unicode_from_glyph_name_strict(gname))\n\t\t\t\t\t\tfontdesc->cid_to_ucs[i] = FZ_REPLACEMENT_CHARACTER;\n\t\t\t\t}\n\t\t\t\tif (i >= 32 && i < 127 && fontdesc->cid_to_ucs[i] == FZ_REPLACEMENT_CHARACTER)\n\t\t\t\t\tfontdesc->cid_to_ucs[i] = i;\n\t\t\t}\n",
+        ),
+    ];
+
+    for &(rel_path, old, new) in tesseract_patches
+        .iter()
+        .chain(freetype_patches)
+        .chain(text_patches)
+    {
         let path = build_dir.join(rel_path);
         let mut source = fs::read_to_string(&path)
             .map_err(|e| format!("Unable to read {}: {e}", path.display()))?;
