@@ -818,6 +818,152 @@ fn patch_mupdf_sources(build_dir: &Path) -> Result<()> {
         ),
     ];
 
+    // FreeType 2.14.3, bundled with MuPDF 1.28.6, lacks upstream fixes from
+    // FreeType 2.15.0 in code that MuPDF builds: the TrueType bytecode
+    // interpreter, CID and CFF charstring loading, and fixed-point helpers
+    // (winner0988/Pdf-reader#626). Applied in order:
+    // - 7974be74d8b5a2fbf99aa88f0461d1f80af51cee
+    // - 1803559c4ee407d0bcbf2a67dbe96690cee869d2
+    // - 7d600a022e1d813e85a8c94ffd395f6135872267
+    // - 287206a96b200f9ab048bb0d83a4dbab8766b9f8
+    // - f3ca71c9900fe860849b3163a6e2c1e765b291d9
+    // - a98c7c223ab274767f41467fe57795d86f60eedc
+    // - c30faba496fdb36d40e290b0b9818fb57d68476a
+    // - 1f705ffb716c7a35efe13d3b58f62ef7c4c6415d
+    // - 968af86becaae66f571feec0c8ad11c1bc39ddd9
+    // - df2fb115bf874a242a9fd49aa99c3c2fd41d151c
+    // - 79d80cadfc3d992e307c15a3f7d3a2a1555235a5
+    // - 1ec3406aef4f19a3808f06317280d011500ee0b5
+    // 1803559c and 7d600a02 go together (the second fixes the first for zones
+    // with fewer than four points), and so do a98c7c22 and c30faba4 (the second
+    // fixes the first where FT_ULong has 32 bits, as on Windows). These are
+    // verbatim upstream changes, applied like tesseract_patches. Other FreeType
+    // 2.15.0 changes are left out: they touch code that 2.14.3 does not have or
+    // that MuPDF does not build, or they change how valid fonts render; see
+    // winner0988/Pdf-reader#626.
+    let freetype_patches: &[(&str, &str, &str)] = &[
+        (
+            "thirdparty/freetype/src/truetype/ttinterp.c",
+            "    IUP_WorkerRec  V;\n    FT_Byte        mask;\n\n    FT_UInt   first_point;   /* first point of contour        */\n    FT_UInt   end_point;     /* end point (last+1) of contour */\n\n    FT_UInt   first_touched; /* first touched point in contour   */\n    FT_UInt   cur_touched;   /* current touched point in contour */\n\n    FT_UInt   point;         /* current point   */\n    FT_Short  contour;       /* current contour */\n\n\n#ifdef TT_SUPPORT_SUBPIXEL_HINTING_MINIMAL\n",
+            "    IUP_WorkerRec  V;\n    FT_Byte        mask;\n\n    FT_UInt  first_point;   /* first point of contour        */\n    FT_UInt  end_point;     /* end point (last+1) of contour */\n\n    FT_UInt  first_touched; /* first touched point in contour   */\n    FT_UInt  cur_touched;   /* current touched point in contour */\n\n    FT_UInt  point;         /* current point   */\n    FT_UInt  contour;       /* current contour */\n\n\n#ifdef TT_SUPPORT_SUBPIXEL_HINTING_MINIMAL\n",
+        ),
+        (
+            "thirdparty/freetype/src/truetype/ttinterp.c",
+            "    /* XXX: UNDOCUMENTED! SHZ doesn't move the phantom points.     */\n    /*      Twilight zone has no real contours, so use `n_points'. */\n    /*      Normal zone's `n_points' includes phantoms, so must    */\n    /*      use end of last contour.                               */\n    if ( exc->GS.gep2 == 0 )\n      limit = exc->zp2.n_points;\n    else if ( exc->GS.gep2 == 1 && exc->zp2.n_contours > 0 )\n      limit = exc->zp2.contours[exc->zp2.n_contours - 1] + 1;\n    else\n      limit = 0;\n\n    /* XXX: UNDOCUMENTED! SHZ doesn't touch the points */\n    for ( i = 0; i < limit; i++ )\n",
+            "    /* XXX: UNDOCUMENTED! SHZ doesn't move the phantom points.     */\n    /*      Twilight zone has no real contours, so use `n_points'. */\n    /*      Normal zone's `n_points' includes phantoms, so must    */\n    /*      subtract them.                                         */\n    if ( exc->GS.gep2 == 0 )\n      limit = exc->zp2.n_points;\n    else\n      limit = exc->zp2.n_points - 4U;\n\n    /* XXX: UNDOCUMENTED! SHZ doesn't touch the points */\n    for ( i = 0; i < limit; i++ )\n",
+        ),
+        (
+            "thirdparty/freetype/src/truetype/ttinterp.c",
+            "    /*      subtract them.                                         */\n    if ( exc->GS.gep2 == 0 )\n      limit = exc->zp2.n_points;\n    else\n      limit = exc->zp2.n_points - 4U;\n\n    /* XXX: UNDOCUMENTED! SHZ doesn't touch the points */\n    for ( i = 0; i < limit; i++ )\n",
+            "    /*      subtract them.                                         */\n    if ( exc->GS.gep2 == 0 )\n      limit = exc->zp2.n_points;\n    else if ( exc->zp2.n_points > 4U )\n      limit = exc->zp2.n_points - 4U;\n    else\n      return;\n\n    /* XXX: UNDOCUMENTED! SHZ doesn't touch the points */\n    for ( i = 0; i < limit; i++ )\n",
+        ),
+        (
+            "thirdparty/freetype/src/truetype/ttinterp.c",
+            "        ARRAY_BOUND_ERROR;\n    }\n    else\n      exc->cvt[I] = FT_MulFix( args[1], exc->tt_metrics.scale );\n  }\n\n\n",
+            "        ARRAY_BOUND_ERROR;\n    }\n    else\n    {\n      Modify_CVT_Check( exc );\n      if ( exc->error )\n        return;\n\n      exc->cvt[I] = FT_MulFix( args[1], exc->tt_metrics.scale );\n    }\n  }\n\n\n",
+        ),
+        (
+            "thirdparty/freetype/src/cid/cidload.c",
+            "    CID_Subrs      subr;\n    FT_UInt        max_offsets = 0;\n    FT_ULong*      offsets = NULL;\n    PSAux_Service  psaux = (PSAux_Service)face->psaux;\n\n\n",
+            "    CID_Subrs      subr;\n    FT_UInt        max_offsets = 0;\n    FT_ULong*      offsets = NULL;\n    FT_ULong       cum_len = 0;\n    PSAux_Service  psaux = (PSAux_Service)face->psaux;\n\n\n",
+        ),
+        (
+            "thirdparty/freetype/src/cid/cidload.c",
+            "      /* now, compute the size of subrs charstrings, */\n      /* allocate, and read them                     */\n      data_len = offsets[num_subrs] - offsets[0];\n\n      if ( FT_QNEW_ARRAY( subr->code, num_subrs + 1 ) ||\n           FT_QALLOC( subr->code[0], data_len )       )\n",
+            "      /* now, compute the size of subrs charstrings, */\n      /* allocate, and read them                     */\n      data_len = offsets[num_subrs] - offsets[0];\n      cum_len += data_len;\n\n      if ( cum_len / 4 > stream->size )\n      {\n        FT_ERROR(( \"cid_read_subrs: excessive overlaps\\n\" ));\n        error = FT_THROW( Invalid_File_Format );\n        goto Fail;\n      }\n\n      if ( FT_QNEW_ARRAY( subr->code, num_subrs + 1 ) ||\n           FT_QALLOC( subr->code[0], data_len )       )\n",
+        ),
+        (
+            "thirdparty/freetype/include/freetype/internal/ftcalc.h",
+            "#endif /* FT_INT64 */\n\n\n  /**************************************************************************\n   *\n   * FT_MulDiv() and FT_MulFix() are declared in freetype.h.\n",
+            "#endif /* FT_INT64 */\n\n\n#define ULABS( a )  ( a >= 0 ? (FT_ULong)a : 0UL - (FT_ULong)a )\n#define  UABS( a )  ( a >= 0 ?  (FT_UInt)a : 0U  -  (FT_UInt)a )\n\n\n  /**************************************************************************\n   *\n   * FT_MulDiv() and FT_MulFix() are declared in freetype.h.\n",
+        ),
+        (
+            "thirdparty/freetype/src/base/ftcalc.c",
+            "  FT_Matrix_Check( const FT_Matrix*  matrix )\n  {\n    FT_Fixed  xx, xy, yx, yy;\n    FT_Fixed  val;\n    FT_Int    shift;\n    FT_ULong  temp1, temp2;\n\n\n    if ( !matrix )\n",
+            "  FT_Matrix_Check( const FT_Matrix*  matrix )\n  {\n    FT_Fixed  xx, xy, yx, yy;\n    FT_ULong  val, abs_det, frob_sq;\n    FT_Int    shift;\n\n\n    if ( !matrix )\n",
+        ),
+        (
+            "thirdparty/freetype/src/base/ftcalc.c",
+            "    xy  = matrix->xy;\n    yx  = matrix->yx;\n    yy  = matrix->yy;\n    val = FT_ABS( xx ) | FT_ABS( xy ) | FT_ABS( yx ) | FT_ABS( yy );\n\n    /* we only handle non-zero 32-bit values */\n    if ( !val || val > 0x7FFFFFFFL )\n      return 0;\n\n    /* Scale matrix to avoid the temp1 overflow, which is */\n    /* more stringent than avoiding the temp2 overflow.   */\n\n    shift = FT_MSB( val ) - 12;\n\n    if ( shift > 0 )\n    {\n",
+            "    xy  = matrix->xy;\n    yx  = matrix->yx;\n    yy  = matrix->yy;\n    val = ULABS( xx ) | ULABS( xy ) | ULABS( yx ) | ULABS( yy );\n\n    /* we only handle non-zero 32-bit values */\n    if ( !val || val > 0x7FFFFFFFUL )\n      return 0;\n\n    /* Scale matrix to avoid overflows */\n    shift = FT_MSB( val ) - 4 * sizeof ( FT_ULong ) - 2;\n\n    if ( shift > 0 )\n    {\n",
+        ),
+        (
+            "thirdparty/freetype/src/base/ftcalc.c",
+            "      yy >>= shift;\n    }\n\n    temp1 = 32U * (FT_ULong)FT_ABS( xx * yy - xy * yx );\n    temp2 = (FT_ULong)( xx * xx ) + (FT_ULong)( xy * xy ) +\n            (FT_ULong)( yx * yx ) + (FT_ULong)( yy * yy );\n\n    if ( temp1 <= temp2 )\n      return 0;\n\n    return 1;\n",
+            "      yy >>= shift;\n    }\n\n    abs_det = ULABS( xx * yy - xy * yx );\n    frob_sq = (FT_ULong)( xx * xx ) + (FT_ULong)( xy * xy ) +\n              (FT_ULong)( yx * yx ) + (FT_ULong)( yy * yy );\n\n    if ( abs_det <= frob_sq / 32 )\n      return 0;\n\n    return 1;\n",
+        ),
+        (
+            "thirdparty/freetype/src/base/ftcalc.c",
+            "    FT_Int    result;\n\n\n    if ( (FT_ULong)FT_ABS( in_x ) + (FT_ULong)FT_ABS( out_y ) <= 92681UL )\n    {\n      z1.lo = (FT_UInt32)in_x * (FT_UInt32)out_y;\n      z1.hi = (FT_UInt32)( (FT_Int32)z1.lo >> 31 );  /* sign-expansion */\n",
+            "    FT_Int    result;\n\n\n    if ( ULABS( in_x ) + ULABS( out_y ) <= 92681UL )\n    {\n      z1.lo = (FT_UInt32)in_x * (FT_UInt32)out_y;\n      z1.hi = (FT_UInt32)( (FT_Int32)z1.lo >> 31 );  /* sign-expansion */\n",
+        ),
+        (
+            "thirdparty/freetype/src/base/ftcalc.c",
+            "    else\n      ft_multo64( (FT_UInt32)in_x, (FT_UInt32)out_y, &z1 );\n\n    if ( (FT_ULong)FT_ABS( in_y ) + (FT_ULong)FT_ABS( out_x ) <= 92681UL )\n    {\n      z2.lo = (FT_UInt32)in_y * (FT_UInt32)out_x;\n      z2.hi = (FT_UInt32)( (FT_Int32)z2.lo >> 31 );  /* sign-expansion */\n",
+            "    else\n      ft_multo64( (FT_UInt32)in_x, (FT_UInt32)out_y, &z1 );\n\n    if ( ULABS( in_y ) + ULABS( out_x ) <= 92681UL )\n    {\n      z2.lo = (FT_UInt32)in_y * (FT_UInt32)out_x;\n      z2.hi = (FT_UInt32)( (FT_Int32)z2.lo >> 31 );  /* sign-expansion */\n",
+        ),
+        (
+            "thirdparty/freetype/src/base/ftcalc.c",
+            "      return 0;\n\n    /* Scale matrix to avoid overflows */\n    shift = FT_MSB( val ) - 4 * sizeof ( FT_ULong ) - 2;\n\n    if ( shift > 0 )\n    {\n",
+            "      return 0;\n\n    /* Scale matrix to avoid overflows */\n    shift = FT_MSB( val ) - 4 * sizeof ( FT_ULong ) + 2;\n\n    if ( shift > 0 )\n    {\n",
+        ),
+        (
+            "thirdparty/freetype/src/psaux/psstack.c",
+            "                     CF2_UInt   idx,\n                     CF2_Fixed  val )\n  {\n    if ( idx > cf2_stack_count( stack ) )\n    {\n      CF2_SET_ERROR( stack->error, Stack_Overflow );\n      return;\n",
+            "                     CF2_UInt   idx,\n                     CF2_Fixed  val )\n  {\n    if ( idx >= cf2_stack_count( stack ) )\n    {\n      CF2_SET_ERROR( stack->error, Stack_Overflow );\n      return;\n",
+        ),
+        (
+            "thirdparty/freetype/src/psaux/psintrp.c",
+            "          FT_TRACE4(( \"%s\", op1 == cf2_cmdCALLGSUBR ? \" callgsubr\"\n                                                    : \" callsubr\" ));\n\n          if ( ( !font->isT1 && charstringIndex > CF2_MAX_SUBR )       ||\n               (  font->isT1 && charstringIndex > T1_MAX_SUBRS_CALLS ) )\n          {\n            /* max subr plus one for charstring */\n            lastError = FT_THROW( Invalid_Glyph_Format );\n",
+            "          FT_TRACE4(( \"%s\", op1 == cf2_cmdCALLGSUBR ? \" callgsubr\"\n                                                    : \" callsubr\" ));\n\n          if ( ( !font->isT1 && charstringIndex >= CF2_MAX_SUBR )       ||\n               (  font->isT1 && charstringIndex >= T1_MAX_SUBRS_CALLS ) )\n          {\n            /* max subr plus one for charstring */\n            lastError = FT_THROW( Invalid_Glyph_Format );\n",
+        ),
+        (
+            "thirdparty/freetype/src/psaux/psintrp.c",
+            "  /* Blend numOperands on the stack,                */\n  /* store results into the first numBlends values, */\n  /* then pop remaining arguments.                  */\n  static void\n  cf2_doBlend( const CFF_Blend  blend,\n               CF2_Stack        opStack,\n               CF2_UInt         numBlends )\n",
+            "  /* Blend numOperands on the stack,                */\n  /* store results into the first numBlends values, */\n  /* then pop remaining arguments.                  */\n  static FT_Error\n  cf2_doBlend( const CFF_Blend  blend,\n               CF2_Stack        opStack,\n               CF2_UInt         numBlends )\n",
+        ),
+        (
+            "thirdparty/freetype/src/psaux/psintrp.c",
+            "    CF2_UInt  base;\n    CF2_UInt  i, j;\n    CF2_UInt  numOperands = (CF2_UInt)( numBlends * blend->lenBV );\n\n\n    base  = cf2_stack_count( opStack ) - numOperands;\n    delta = base + numBlends;\n\n    FT_TRACE6(( \" (\" ));\n",
+            "    CF2_UInt  base;\n    CF2_UInt  i, j;\n    CF2_UInt  numOperands = (CF2_UInt)( numBlends * blend->lenBV );\n    CF2_UInt  count       = cf2_stack_count( opStack );\n\n\n    if ( numOperands > count )\n      return FT_THROW( Stack_Underflow );\n\n    base  = count - numOperands;\n    delta = base + numBlends;\n\n    FT_TRACE6(( \" (\" ));\n",
+        ),
+        (
+            "thirdparty/freetype/src/psaux/psintrp.c",
+            "\n    /* leave only `numBlends' results on stack */\n    cf2_stack_pop( opStack, numOperands - numBlends );\n  }\n\n\n",
+            "\n    /* leave only `numBlends' results on stack */\n    cf2_stack_pop( opStack, numOperands - numBlends );\n\n    return FT_Err_Ok;\n  }\n\n\n",
+        ),
+        (
+            "thirdparty/freetype/src/psaux/psintrp.c",
+            "\n          /* do the blend */\n          numBlends = (FT_UInt)cf2_stack_popInt( opStack );\n          if ( numBlends > stackSize )\n          {\n            lastError = FT_THROW( Invalid_Glyph_Format );\n            goto exit;\n          }\n\n          cf2_doBlend( &font->blend, opStack, numBlends );\n\n          font->blend.usedBV = TRUE;\n        }\n",
+            "\n          /* do the blend */\n          numBlends = (FT_UInt)cf2_stack_popInt( opStack );\n\n          lastError = cf2_doBlend( &font->blend, opStack, numBlends );\n          if ( lastError )\n            goto exit;\n\n          font->blend.usedBV = TRUE;\n        }\n",
+        ),
+        (
+            "thirdparty/freetype/src/psaux/psintrp.c",
+            "    CF2_UInt  delta;\n    CF2_UInt  base;\n    CF2_UInt  i, j;\n    CF2_UInt  numOperands = (CF2_UInt)( numBlends * blend->lenBV );\n    CF2_UInt  count       = cf2_stack_count( opStack );\n\n\n    if ( numOperands > count )\n      return FT_THROW( Stack_Underflow );\n\n",
+            "    CF2_UInt  delta;\n    CF2_UInt  base;\n    CF2_UInt  i, j;\n    CF2_UInt  numOperands;\n    CF2_UInt  count = cf2_stack_count( opStack );\n\n\n    if ( blend->lenBV == 0                ||\n         numBlends > count / blend->lenBV )\n      return FT_THROW( Stack_Underflow );\n\n    numOperands = numBlends * blend->lenBV;  /* cannot overflow here */\n    if ( numOperands > count )\n      return FT_THROW( Stack_Underflow );\n\n",
+        ),
+        (
+            "thirdparty/freetype/src/psaux/psstack.c",
+            "    CF2_StackNumber  last = { { 0 }, CF2_NumberInt };\n\n    CF2_Int  start_idx, idx, i;\n\n\n    if ( count < 2 )\n",
+            "    CF2_StackNumber  last = { { 0 }, CF2_NumberInt };\n\n    CF2_Int  start_idx, idx, i;\n    CF2_Int  offset;\n\n\n    if ( count < 2 )\n",
+        ),
+        (
+            "thirdparty/freetype/src/psaux/psstack.c",
+            "      return;\n    }\n\n    /* before C99 it is implementation-defined whether    */\n    /* the result of `%' is negative if the first operand */\n    /* is negative                                        */\n",
+            "      return;\n    }\n\n    offset = (CF2_Int)cf2_stack_count( stack ) - count;\n\n    /* before C99 it is implementation-defined whether    */\n    /* the result of `%' is negative if the first operand */\n    /* is negative                                        */\n",
+        ),
+        (
+            "thirdparty/freetype/src/psaux/psstack.c",
+            "      {\n        start_idx++;\n        idx  = start_idx;\n        last = stack->buffer[idx];\n      }\n\n      idx += shift;\n",
+            "      {\n        start_idx++;\n        idx  = start_idx;\n        last = stack->buffer[idx + offset];\n      }\n\n      idx += shift;\n",
+        ),
+        (
+            "thirdparty/freetype/src/psaux/psstack.c",
+            "      else if ( idx < 0 )\n        idx += count;\n\n      tmp                = stack->buffer[idx];\n      stack->buffer[idx] = last;\n      last               = tmp;\n    }\n  }\n\n",
+            "      else if ( idx < 0 )\n        idx += count;\n\n      tmp                         = stack->buffer[idx + offset];\n      stack->buffer[idx + offset] = last;\n      last                        = tmp;\n    }\n  }\n\n",
+        ),
+    ];
+
     // Some upstream Tesseract fixes only change code that MuPDF does not build:
     // the legacy engine (DISABLED_LEGACY_ENGINE; src/classify/intproto.cpp,
     // normmatch.cpp and adaptmatch.cpp are not in the source lists) and the
@@ -850,7 +996,7 @@ fn patch_mupdf_sources(build_dir: &Path) -> Result<()> {
         Err("Unable to patch Tesseract: MuPDF now builds its legacy engine or FAST_FLOAT code; check the upstream fixes left out of tesseract_patches".to_string())?;
     }
 
-    for &(rel_path, old, new) in tesseract_patches {
+    for &(rel_path, old, new) in tesseract_patches.iter().chain(freetype_patches) {
         let path = build_dir.join(rel_path);
         let mut source = fs::read_to_string(&path)
             .map_err(|e| format!("Unable to read {}: {e}", path.display()))?;
