@@ -1021,10 +1021,74 @@ fn patch_mupdf_sources(build_dir: &Path) -> Result<()> {
         ),
     ];
 
+    // Limits for tiling patterns that cannot finish painting (winner0988/Pdf-reader#550), not
+    // in upstream (1.28.x branch or master) as of 2026-11-22. Such a page now fails at once with
+    // FZ_ERROR_LIMIT instead of running into the worker's 30 s render timeout:
+    // - draw-device.c: 1.28 doubles a step that moves less than 1/16 pixel, but a large tile
+    //   with a small step is still painted once per repeat, about tile area * clip area /
+    //   cell area pixels in all. A pattern whose painting would take far longer than the
+    //   timeout is refused before the loop starts.
+    // - pdf-op-run.c: a pattern that uses blending (or a device that asks for no tiling) runs
+    //   the pattern's content once per repeat, with no guard at all against tiny steps. More
+    //   repeats than could run within the timeout are refused.
+    let tiling_patches: &[(&str, &str, &str)] = &[
+        (
+            "source/fitz/draw-device.c",
+            "\t\tif (abandon)\n\t\t\tbreak;\n\n\t\tdest = fz_new_pixmap_from_pixmap(ctx, state[1].dest, NULL);\n",
+            concat!(
+                "\t\tif (abandon)\n\t\t\tbreak;\n\n",
+                "\t\t/* pdf-reader #550: refuse a tiling pattern that would take far longer to paint\n",
+                "\t\t * than any page should. Every repeat below paints the part of the tile that\n",
+                "\t\t * falls inside the clip; summed over all repeats that is about tile area * clip\n",
+                "\t\t * area / cell area pixels (the cell being what one step in x and one in y span\n",
+                "\t\t * on the page), and never more than every repeat painting all of its overlap.\n",
+                "\t\t * Rows and repeats cost a little more each. Each weight is below the cost\n",
+                "\t\t * measured on the fastest case (a transparent tile), so a pattern refused here\n",
+                "\t\t * could not have been painted within the worker's 30 s render timeout. */\n",
+                "\t\t{\n",
+                "\t\t\tfz_irect clip = fz_intersect_irect(state[0].scissor, fz_pixmap_bbox(ctx, state[0].dest));\n",
+                "\t\t\tdouble cw = clip.x1 > clip.x0 ? (double)clip.x1 - clip.x0 : 0;\n",
+                "\t\t\tdouble ch = clip.y1 > clip.y0 ? (double)clip.y1 - clip.y0 : 0;\n",
+                "\t\t\tdouble tw = state[1].dest->w;\n",
+                "\t\t\tdouble th = state[1].dest->h;\n",
+                "\t\t\tdouble repeats = x1 > x0 && y1 > y0 ? ((double)x1 - x0) * ((double)y1 - y0) : 0;\n",
+                "\t\t\tdouble cell = fabs((double)ctm.a * ctm.d - (double)ctm.b * ctm.c) * fabs((double)xstep * ystep);\n",
+                "\t\t\tdouble pixels = repeats * (tw < cw ? tw : cw) * (th < ch ? th : ch);\n",
+                "\t\t\tdouble rows = repeats * (th < ch ? th : ch);\n",
+                "\t\t\tdouble work;\n\n",
+                "\t\t\tif (cell > 0 && tw * th * cw * ch / cell < pixels)\n",
+                "\t\t\t\tpixels = tw * th * cw * ch / cell;\n",
+                "\t\t\tif (cell > 0 && (tw + cw) * th * ch / cell < rows)\n",
+                "\t\t\t\trows = (tw + cw) * th * ch / cell;\n",
+                "\t\t\twork = (1 + (state[1].shape != NULL) + (state[1].group_alpha != NULL)) * (pixels + 8 * rows) + 64 * repeats;\n",
+                "\t\t\tif (work > 274877906944.0) /* 2^38 */\n",
+                "\t\t\t\tfz_throw(ctx, FZ_ERROR_LIMIT, \"tiling pattern needs too much painting\");\n",
+                "\t\t}\n\n",
+                "\t\tdest = fz_new_pixmap_from_pixmap(ctx, state[1].dest, NULL);\n",
+            ),
+        ),
+        (
+            "source/pdf/pdf-op-run.c",
+            "\t\tint x, y;\n\n\t\t/* When calculating the number of tiles required, we adjust by\n",
+            concat!(
+                "\t\tint x, y;\n\n",
+                "\t\t/* pdf-reader #550: here the pattern's content runs once per repeat, with no guard\n",
+                "\t\t * against tiny steps (this path is taken when the pattern uses blending, or the\n",
+                "\t\t * device asks for no tiling). Even empty content costs about a microsecond a\n",
+                "\t\t * repeat, so refuse more repeats than could run within the worker's 30 s render\n",
+                "\t\t * timeout. The count comes from the unrounded values, before they become ints. */\n",
+                "\t\tif (((double)fx1 - fx0 + 1) * ((double)fy1 - fy0 + 1) > 67108864.0) /* 2^26 */\n",
+                "\t\t\tfz_throw(ctx, FZ_ERROR_LIMIT, \"tiling pattern needs too many repeats\");\n\n",
+                "\t\t/* When calculating the number of tiles required, we adjust by\n",
+            ),
+        ),
+    ];
+
     for &(rel_path, old, new) in tesseract_patches
         .iter()
         .chain(freetype_patches)
         .chain(text_patches)
+        .chain(tiling_patches)
     {
         let path = build_dir.join(rel_path);
         let mut source = fs::read_to_string(&path)
