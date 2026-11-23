@@ -997,12 +997,21 @@ fn patch_mupdf_sources(build_dir: &Path) -> Result<()> {
     }
 
     // MuPDF 1.28 text extraction fixes, not fixed upstream (1.28.x branch or master) as of
-    // 2026-11-20:
-    // - pdf-op-run.c: a glyph drawn with text render mode 4, 5 or 6 also goes into the
-    //   clip that ET applies, and the structured text device took that copy as text a
-    //   second time. The clip copy of a drawn glyph gets no Unicode value (-1, as for the
-    //   extra glyphs of one character), which the text device skips; glyphs that are only
-    //   clipped (mode 7) keep theirs.
+    // 2026-11-23:
+    // - pdf-op-run.c: 1.28 collects the glyphs drawn with text render modes 4 to 7 into a
+    //   separate copy of the text, which ET applies as a clip and sends to the device as
+    //   clipped text. Three problems came with it:
+    //   - the structured text device took the copy of a drawn glyph (modes 4 to 6) as text a
+    //     second time (winner0988/Pdf-reader#628);
+    //   - ET decided from the mode of the last part of the text object whether to clip, so a
+    //     text object that went back to modes 0 to 3 lost its clip, and its mode 7 text with
+    //     it (winner0988/Pdf-reader#638);
+    //   - the copy holds only the first character of a glyph that maps to several, so mode 7
+    //     text lost the others, such as the i of an fi ligature (winner0988/Pdf-reader#678).
+    //   The clip copy now carries no characters (-1, as for the extra glyphs of one character,
+    //   which the text device skips). Mode 7 text is sent as invisible text when its part of
+    //   the text object is flushed, as mode 3 text is, so the text device gets every
+    //   character once and in order. ET applies the clip whatever the mode of the last part.
     // - pdf-type3.c: 1.28 reads a g name that is not a standard glyph name (g0024, g41) as a
     //   hexadecimal TrueType glyph index, a guess for old Ghostscript TrueType subsets. Type 3
     //   fonts that name their glyphs after the character code (g32, g33, ...) then got wrong
@@ -1012,7 +1021,12 @@ fn patch_mupdf_sources(build_dir: &Path) -> Result<()> {
         (
             "source/pdf/pdf-op-run.c",
             "\t\tpdf_tos_accumulate_clip(ctx, &pr->tos);\n\t\tfz_show_glyph_aux(ctx, pr->tos.clip_text, fontdesc->font, trm, adv, gid, ucsbuf[0], cid, fontdesc->wmode, pr->bidi, FZ_BIDI_NEUTRAL, lang);\n",
-            "\t\tpdf_tos_accumulate_clip(ctx, &pr->tos);\n\t\tfz_show_glyph_aux(ctx, pr->tos.clip_text, fontdesc->font, trm, adv, gid, pr->tos.text_mode == 7 ? ucsbuf[0] : -1, cid, fontdesc->wmode, pr->bidi, FZ_BIDI_NEUTRAL, lang);\n",
+            "\t\tpdf_tos_accumulate_clip(ctx, &pr->tos);\n\t\tfz_show_glyph_aux(ctx, pr->tos.clip_text, fontdesc->font, trm, adv, gid, -1, cid, fontdesc->wmode, pr->bidi, FZ_BIDI_NEUTRAL, lang);\n",
+        ),
+        (
+            "source/pdf/pdf-op-run.c",
+            "\t\tcase 7: doclip = 1; break;\n\t\t}\n\n\t\tif (flush_clip)\n\t\t\tdostroke = dofill = 0;\n\t\telse\n\t\t\tdoclip = 0;\n",
+            "\t\tcase 7: doclip = doinvisible = 1; break;\n\t\t}\n\n\t\t/* pdf-reader #638, #678: mode 7 text is reported as invisible text, with all its\n\t\t * characters, when its part of the text object is flushed. At ET the glyphs of\n\t\t * modes 4 to 7 always become the clip, whatever the mode of the last part. */\n\t\tif (flush_clip)\n\t\t{\n\t\t\tdofill = dostroke = doinvisible = 0;\n\t\t\tdoclip = 1;\n\t\t}\n\t\telse\n\t\t\tdoclip = 0;\n",
         ),
         (
             "source/pdf/pdf-type3.c",
