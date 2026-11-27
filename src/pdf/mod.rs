@@ -6,6 +6,7 @@ pub mod intent;
 pub mod links;
 pub mod object;
 pub mod page;
+pub mod text_filter;
 pub mod widget;
 
 #[cfg(test)]
@@ -33,6 +34,7 @@ pub use page::{
     ExtractedImage, FontInfo, ImagePlacement, InsertFontOptions, InsertImageOptions, PageImageInfo,
     PageImageSource, PdfPage,
 };
+pub use text_filter::{TextFilterAction, TextFilterGlyph, TextFilterOptions, TextRenderMode};
 pub use widget::{FieldFlags, PdfWidget, PdfWidgetIter, WidgetType};
 
 #[must_use]
